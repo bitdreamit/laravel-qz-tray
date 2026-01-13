@@ -1,0 +1,42 @@
+laravel-qz-tray/
+├── .github/
+│   └── workflows/
+│       └── release.yml
+├── composer.json
+├── LICENSE
+├── README.md
+├── config/
+│   └── qz-tray.php
+├── database/
+│   └── migrations/
+│       └── 2024_01_01_000000_create_qz_print_jobs_table.php
+├── routes/
+│   ├── web.php
+│   └── api.php
+├── resources/
+│   ├── js/
+│   │   ├── smart-print.js
+│   │   ├── smart-print.min.js
+│   │   ├── printer-switcher.js
+│   │   ├── printer-status.js
+│   │   └── adapters/
+│   │       ├── escpos.js
+│   │       ├── zpl.js
+│   │       └── raw-print.js
+│   └── installers/
+│       ├── qz-tray-windows.exe
+│       ├── qz-tray-linux.deb
+│       └── qz-tray-macos.pkg
+├── src/
+│   ├── QzTrayServiceProvider.php
+│   ├── Console/
+│   │   └── Commands/
+│   │       ├── InstallQzTray.php
+│   │       └── GenerateCertificate.php
+│   └── Http/
+│       └── Controllers/
+│           └── QzSecurityController.php
+└── storage/
+    └── qz/
+        ├── certificate.pem
+        └── private-key.pem

@@ -1,0 +1,56 @@
+{
+    "name": "bitdreamit/laravel-qz-tray",
+    "description": "Enterprise silent printing with QZ Tray for Laravel - Zero configuration, automatic certificate, browser caching",
+    "type": "library",
+    "keywords": ["laravel", "qz-tray", "printing", "thermal", "receipt", "zpl", "escpos"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Bitdreamit",
+            "email": "info@bitdreamit.com"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "illuminate/support": "^10.0|^11.0",
+        "illuminate/database": "^10.0|^11.0",
+        "illuminate/routing": "^10.0|^11.0",
+        "ext-openssl": "*"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^8.0",
+        "phpunit/phpunit": "^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Bitdreamit\\QzTray\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Bitdreamit\\QzTray\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Bitdreamit\\QzTray\\QzTrayServiceProvider"
+            ],
+            "aliases": {
+                "QzTray": "Bitdreamit\\QzTray\\Facades\\QzTray"
+            }
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/phpunit",
+        "test-coverage": "vendor/bin/phpunit --coverage-html coverage"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}
