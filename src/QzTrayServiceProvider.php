@@ -41,7 +41,7 @@ class QzTrayServiceProvider extends ServiceProvider
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
 
         // Auto-generate certificate on first install
-        $this->autoGenerateCertificate();
+//        $this->autoGenerateCertificate();
 
         // Register console commands
         if ($this->app->runningInConsole()) {
@@ -68,37 +68,49 @@ class QzTrayServiceProvider extends ServiceProvider
      */
     protected function autoGenerateCertificate(): void
     {
-        $certPath = config('qz-tray.cert_path', storage_path('qz/certificate.pem'));
-        $keyPath = config('qz-tray.key_path', storage_path('qz/private-key.pem'));
-
-        if (!file_exists($certPath) && !file_exists($keyPath)) {
-            @mkdir(dirname($certPath), 0755, true);
-
-            $config = [
-                'digest_alg' => 'sha512',
-                'private_key_bits' => 4096,
-                'private_key_type' => OPENSSL_KEYTYPE_RSA,
-            ];
-
-            $keypair = openssl_pkey_new($config);
-            openssl_pkey_export($keypair, $privateKey);
-
-            $dn = [
-                'countryName' => 'US',
-                'stateOrProvinceName' => 'California',
-                'localityName' => 'San Francisco',
-                'organizationName' => 'Laravel QZ Tray',
-                'commonName' => 'qz-tray.local',
-                'emailAddress' => 'admin@example.com',
-            ];
-
-            $csr = openssl_csr_new($dn, $keypair, $config);
-            $cert = openssl_csr_sign($csr, null, $keypair, 3650, $config, time());
-
-            openssl_x509_export($cert, $certificate);
-
-            file_put_contents($certPath, $certificate);
-            file_put_contents($keyPath, $privateKey);
+        if (! extension_loaded('openssl')) {
+            return;
         }
+
+        $certPath = config('qz-tray.cert_path', storage_path('qz/certificate.pem'));
+        $keyPath  = config('qz-tray.key_path', storage_path('qz/private-key.pem'));
+
+        if (file_exists($certPath) && file_exists($keyPath)) {
+            return;
+        }
+
+        @mkdir(dirname($certPath), 0755, true);
+
+        $config = [
+            'digest_alg' => 'sha256',
+            'private_key_bits' => 2048,
+            'private_key_type' => OPENSSL_KEYTYPE_RSA,
+        ];
+
+        $keypair = openssl_pkey_new($config);
+
+        if ($keypair === false) {
+            throw new \RuntimeException(
+                'Unable to generate OpenSSL private key.
+            Please check your OpenSSL configuration.'
+            );
+        }
+
+        openssl_pkey_export($keypair, $privateKey);
+
+        $dn = [
+            'countryName' => 'US',
+            'organizationName' => 'Laravel QZ Tray',
+            'commonName' => 'qz-tray.local',
+        ];
+
+        $csr = openssl_csr_new($dn, $keypair, $config);
+        $cert = openssl_csr_sign($csr, null, $keypair, 3650);
+
+        openssl_x509_export($cert, $certificate);
+
+        file_put_contents($certPath, $certificate);
+        file_put_contents($keyPath, $privateKey);
     }
+
 }
