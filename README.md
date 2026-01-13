@@ -1,5 +1,9 @@
 # 📦 Laravel QZ Tray - Complete Package Documentation
-
+[![Latest Version](https://img.shields.io/packagist/v/bitdreamit/laravel-qz-tray.svg)](https://packagist.org/packages/bitdreamit/laravel-qz-tray)
+[![Total Downloads](https://img.shields.io/packagist/dt/bitdreamit/laravel-qz-tray.svg)](https://packagist.org/packages/bitdreamit/laravel-qz-tray)
+[![License](https://img.shields.io/packagist/l/bitdreamit/laravel-qz-tray.svg)](https://packagist.org/packages/bitdreamit/laravel-qz-tray)
+[![PHP Version](https://img.shields.io/packagist/php-v/bitdreamit/laravel-qz-tray.svg)](https://packagist.org/packages/bitdreamit/laravel-qz-tray)
+[![Laravel Version](https://img.shields.io/badge/Laravel-9.x|10.x|11.x|12.x-brightgreen.svg)](https://laravel.com)
 ## 🎯 **What is This Package?**
 
 **Laravel QZ Tray** is a complete silent printing solution that connects your Laravel application to desktop printers via QZ Tray. It allows you to print directly from the browser without print dialogs, with smart caching, printer memory, and automatic fallback.
