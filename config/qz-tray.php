@@ -26,10 +26,10 @@ return [
     |--------------------------------------------------------------------------
     */
     'websocket' => [
-        'host' => env('QZ_WEBSOCKET_HOST', '127.0.0.1'),
-        'port' => env('QZ_WEBSOCKET_PORT', 8181),
-        'retries' => 3,
-        'timeout' => 30,
+        'host' => env('QZ_WEBSOCKET_HOST', 'localhost.qz.io'),
+        'port' => env('QZ_WEBSOCKET_PORT', 8182),
+        'retries' => 1,
+        'timeout' => 10,
     ],
 
     /*

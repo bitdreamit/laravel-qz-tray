@@ -1,7 +1,7 @@
 /**
  * Laravel QZ Tray - Smart Print
  * Complete printing solution for Laravel with QZ Tray
- * Version: 2.0.0
+ * Version: 2.0.1 (Fixed error handling)
  */
 (function() {
     'use strict';
@@ -9,7 +9,7 @@
     const CONFIG = {
         ENDPOINT: (window.QZ_CONFIG && window.QZ_CONFIG.endpoint) || '/qz',
         DEBUG: (window.QZ_CONFIG && window.QZ_CONFIG.debug) || false,
-        VERSION: '2.0.0',
+        VERSION: '2.0.1',
         CONNECT_TIMEOUT: 10000,
         PRINT_TIMEOUT: 30000,
         PDF_TIMEOUT: 30000,
@@ -69,7 +69,7 @@
                 try {
                     callback(data);
                 } catch (e) {
-                    error('Event listener error:', e);
+                    console.error('Event listener error:', e);
                 }
             });
         }
@@ -124,8 +124,8 @@
                         localStorage.setItem(CONFIG.STORAGE_KEYS.CERTIFICATE, certificate);
                         resolve(certificate);
                     })
-                    .catch(error => {
-                        reject(new Error(`Failed to load certificate: ${error.message}`));
+                    .catch(err => {
+                        reject(new Error(`Failed to load certificate: ${err.message}`));
                     });
             });
         });
@@ -151,8 +151,8 @@
                     .then(signature => {
                         resolve(signature);
                     })
-                    .catch(error => {
-                        reject(new Error(`Failed to get signature: ${error.message}`));
+                    .catch(err => {
+                        reject(new Error(`Failed to get signature: ${err.message}`));
                     });
             });
         });
@@ -169,9 +169,10 @@
         try {
             log('Connecting to QZ Tray...');
 
+            // FIX: Use proper connection options
             await qz.websocket.connect({
-                retries: 3,
-                delay: 1000,
+                retries: 1,  // Reduced from 3 to prevent port scanning
+                delay: 500,
                 timeout: CONFIG.CONNECT_TIMEOUT,
             });
 
@@ -180,9 +181,9 @@
             log('Connected to QZ Tray');
 
             return true;
-        } catch (error) {
-            emit('connection-failed', { error: error.message });
-            error('Connection failed:', error.message);
+        } catch (err) {
+            emit('connection-failed', { error: err.message });
+            console.error('Connection failed:', err.message);
 
             return false;
         }
@@ -231,9 +232,9 @@
             }
 
             return [];
-        } catch (error) {
-            emit('printers-error', { error: error.message });
-            error('Failed to load printers:', error);
+        } catch (err) {
+            emit('printers-error', { error: err.message });
+            console.error('Failed to load printers:', err);
 
             try {
                 if (state.connected) {
@@ -291,7 +292,7 @@
                     return defaultPrinter || printers[0];
                 }
             } catch (e) {
-                error('Failed to get default printer:', e);
+                console.error('Failed to get default printer:', e);
             }
         }
 
@@ -325,7 +326,7 @@
                 })
             });
         } catch (e) {
-            warn('Failed to save printer to server:', e);
+            console.warn('Failed to save printer to server:', e);
         }
 
         emit('printer-saved', { path, printer });
@@ -403,14 +404,14 @@
             log(`PDF fetched successfully (${blob.size} bytes)`);
             return base64Data;
 
-        } catch (error) {
+        } catch (err) {
             clearTimeout(timeoutId);
 
-            if (error.name === 'AbortError') {
+            if (err.name === 'AbortError') {
                 throw new Error('PDF download timeout');
             }
 
-            throw error;
+            throw err;
         }
     }
 
@@ -533,20 +534,20 @@
                     })
                 });
             } catch (e) {
-                warn('Failed to notify server:', e);
+                console.warn('Failed to notify server:', e);
             }
 
             emit('job-completed', { job });
             log(`Job completed: ${job.id} in ${job.duration}ms`);
 
-        } catch (error) {
+        } catch (err) {
             job.status = 'failed';
-            job.error = error.message;
+            job.error = err.message;
             job.endTime = Date.now();
             job.duration = job.endTime - job.startTime;
 
-            emit('job-failed', { job, error: error.message });
-            error(`Job failed: ${job.id}`, error);
+            emit('job-failed', { job, error: err.message });
+            console.error(`Job failed: ${job.id}`, err);
 
             if (job.attempts < CONFIG.MAX_RETRIES) {
                 log(`Retrying job ${job.id} (attempt ${job.attempts + 1})`);
@@ -573,7 +574,7 @@
                     try {
                         printWindow.print();
                     } catch (e) {
-                        warn('Browser print failed:', e);
+                        console.warn('Browser print failed:', e);
                     }
                 };
             }
@@ -665,7 +666,7 @@
                 state.settings = { ...state.settings, ...JSON.parse(saved) };
             }
         } catch (e) {
-            error('Failed to load settings:', e);
+            console.error('Failed to load settings:', e);
         }
     }
 
@@ -676,7 +677,7 @@
                 JSON.stringify(state.settings)
             );
         } catch (e) {
-            error('Failed to save settings:', e);
+            console.error('Failed to save settings:', e);
         }
     }
 
@@ -805,9 +806,9 @@
             emit('ready', { version: CONFIG.VERSION });
             log('Smart-Print initialized successfully');
 
-        } catch (error) {
-            error('Initialization failed:', error);
-            emit('init-failed', { error: error.message });
+        } catch (err) {
+            console.error('Initialization failed:', err);
+            emit('init-failed', { error: err.message });
         }
     }
 
