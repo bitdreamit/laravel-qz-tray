@@ -1,7 +1,7 @@
 /**
  * Laravel QZ Tray - Smart Print
- * Complete printing solution for Laravel with QZ Tray
- * Version: 2.0.1 (Fixed error handling)
+ * Official QZ Tray API Integration
+ * Version: 2.1.0 (Official API Compliant)
  */
 (function() {
     'use strict';
@@ -9,23 +9,18 @@
     const CONFIG = {
         ENDPOINT: (window.QZ_CONFIG && window.QZ_CONFIG.endpoint) || '/qz',
         DEBUG: (window.QZ_CONFIG && window.QZ_CONFIG.debug) || false,
-        VERSION: '2.0.1',
-        CONNECT_TIMEOUT: 10000,
+        VERSION: '2.1.0',
         PRINT_TIMEOUT: 30000,
         PDF_TIMEOUT: 30000,
-        MAX_RETRIES: 3,
-        RETRY_DELAY: 1000,
-        CERT_CACHE_DURATION: 3600000,
-        PRINTER_CACHE_DURATION: 300000,
+        MAX_RETRIES: 2,
         STORAGE_KEYS: {
-            CERTIFICATE: 'qz_certificate_v2',
-            PRINTERS: 'qz_printers_v2',
-            PRINTER_MAP: 'qz_printer_map_v2',
-            SETTINGS: 'qz_settings_v2',
-            PRINT_JOBS: 'qz_print_jobs_v2',
+            CERTIFICATE: 'qz_certificate_official',
+            PRINTERS: 'qz_printers_official',
+            PRINTER_MAP: 'qz_printer_map_official',
+            SETTINGS: 'qz_settings_official',
         },
         DEFAULT_SETTINGS: {
-            autoConnect: true,
+            autoConnect: false,
             rememberPrinters: true,
             showNotifications: true,
             fallbackToBrowser: true,
@@ -51,14 +46,6 @@
         }
     }
 
-    function error(...args) {
-        console.error('[Smart-Print]', ...args);
-    }
-
-    function warn(...args) {
-        console.warn('[Smart-Print]', ...args);
-    }
-
     function emit(event, data = {}) {
         const fullEvent = `smartprint:${event}`;
         const eventObj = new CustomEvent(fullEvent, { detail: data });
@@ -77,33 +64,39 @@
         log(`Event emitted: ${event}`, data);
     }
 
+    // Wait for QZ Tray library
     async function waitForQz() {
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
             if (typeof qz !== 'undefined' && qz.security) {
                 resolve();
                 return;
             }
 
-            const maxAttempts = 50;
+            const maxAttempts = 30;
             let attempts = 0;
 
-            const interval = setInterval(() => {
+            const check = setInterval(() => {
                 attempts++;
 
                 if (typeof qz !== 'undefined' && qz.security) {
-                    clearInterval(interval);
+                    clearInterval(check);
                     resolve();
                 } else if (attempts >= maxAttempts) {
-                    clearInterval(interval);
-                    reject(new Error('QZ Tray library not loaded'));
+                    clearInterval(check);
+                    console.error('QZ Tray library not loaded');
+                    resolve();
                 }
             }, 100);
         });
     }
 
+    // Setup security certificates (Official QZ Tray way)
     function setupSecurity() {
+        log('Setting up QZ Tray security...');
+
         qz.security.setCertificatePromise(function() {
             return new Promise((resolve, reject) => {
+                // Try cache first
                 const cached = localStorage.getItem(CONFIG.STORAGE_KEYS.CERTIFICATE);
                 if (cached) {
                     log('Using cached certificate');
@@ -116,7 +109,7 @@
                 fetch(`${CONFIG.ENDPOINT}/certificate`)
                     .then(response => {
                         if (!response.ok) {
-                            throw new Error(`Certificate request failed: ${response.status}`);
+                            throw new Error(`HTTP ${response.status}`);
                         }
                         return response.text();
                     })
@@ -124,8 +117,9 @@
                         localStorage.setItem(CONFIG.STORAGE_KEYS.CERTIFICATE, certificate);
                         resolve(certificate);
                     })
-                    .catch(err => {
-                        reject(new Error(`Failed to load certificate: ${err.message}`));
+                    .catch(error => {
+                        console.error('Failed to load certificate:', error);
+                        reject(error);
                     });
             });
         });
@@ -144,23 +138,27 @@
                 })
                     .then(response => {
                         if (!response.ok) {
-                            throw new Error(`Signature request failed: ${response.status}`);
+                            throw new Error(`HTTP ${response.status}`);
                         }
                         return response.text();
                     })
                     .then(signature => {
                         resolve(signature);
                     })
-                    .catch(err => {
-                        reject(new Error(`Failed to get signature: ${err.message}`));
+                    .catch(error => {
+                        console.error('Failed to get signature:', error);
+                        reject(error);
                     });
             });
         });
+
+        log('Security setup complete');
     }
 
+    // Connect to QZ Tray (Official API)
     async function connect() {
         if (state.connected) {
-            log('Already connected');
+            log('Already connected to QZ Tray');
             return true;
         }
 
@@ -169,55 +167,72 @@
         try {
             log('Connecting to QZ Tray...');
 
-            // FIX: Use proper connection options
-            await qz.websocket.connect({
-                retries: 1,  // Reduced from 3 to prevent port scanning
-                delay: 500,
-                timeout: CONFIG.CONNECT_TIMEOUT,
-            });
+            // Use official QZ Tray connection method
+            // Note: QZ Tray handles its own retry logic and port discovery
+            await qz.websocket.connect();
 
             state.connected = true;
             emit('connected');
-            log('Connected to QZ Tray');
+            log('✅ Connected to QZ Tray');
 
             return true;
-        } catch (err) {
-            emit('connection-failed', { error: err.message });
-            console.error('Connection failed:', err.message);
 
+        } catch (error) {
+            console.error('Connection failed:', error.message);
+
+            // Check if already connected (QZ Tray might throw error but still be connected)
+            try {
+                // Try to get printers - if this works, we're connected
+                const printers = await qz.printers.find();
+                if (printers && printers.length > 0) {
+                    state.connected = true;
+                    emit('connected');
+                    log('✅ QZ Tray connection verified via printer list');
+                    return true;
+                }
+            } catch (e) {
+                // Not connected
+            }
+
+            emit('connection-failed', { error: error.message });
             return false;
         }
     }
 
+    // Get printers (with caching)
     async function getPrinters() {
+        // Check cache first
         if (state.settings.cachePrinters) {
             const cached = localStorage.getItem(CONFIG.STORAGE_KEYS.PRINTERS);
             if (cached) {
                 try {
                     const data = JSON.parse(cached);
-                    if (Date.now() - data.timestamp < CONFIG.PRINTER_CACHE_DURATION) {
+                    if (Date.now() - data.timestamp < 300000) { // 5 minutes
                         state.printers = data.printers;
                         log('Loaded printers from cache:', state.printers.length);
                         return state.printers;
                     }
-                } catch (e) {}
+                } catch (e) {
+                    // Cache invalid
+                }
             }
         }
 
         try {
-            log('Fetching printers from server...');
+            log('Getting printers from QZ Tray...');
 
-            const response = await fetch(`${CONFIG.ENDPOINT}/printers`);
-
-            if (!response.ok) {
-                throw new Error(`Failed to fetch printers: ${response.status}`);
+            // Ensure connected
+            if (!state.connected && !(await connect())) {
+                throw new Error('Not connected to QZ Tray');
             }
 
-            const data = await response.json();
+            // Get printers from QZ Tray
+            const qzPrinters = await qz.printers.find();
 
-            if (data.success && data.printers) {
-                state.printers = Array.isArray(data.printers) ? data.printers : [];
+            if (qzPrinters && qzPrinters.length > 0) {
+                state.printers = qzPrinters;
 
+                // Cache results
                 if (state.settings.cachePrinters) {
                     localStorage.setItem(CONFIG.STORAGE_KEYS.PRINTERS, JSON.stringify({
                         printers: state.printers,
@@ -225,46 +240,41 @@
                     }));
                 }
 
-                emit('printers-loaded', { printers: state.printers, cached: false });
-                log('Printers loaded from server:', state.printers.length);
+                emit('printers-loaded', { printers: state.printers });
+                log(`Found ${state.printers.length} printer(s)`);
 
                 return state.printers;
             }
 
             return [];
-        } catch (err) {
-            emit('printers-error', { error: err.message });
-            console.error('Failed to load printers:', err);
 
-            try {
-                if (state.connected) {
-                    const qzPrinters = await qz.printers.find();
-                    if (qzPrinters && qzPrinters.length > 0) {
-                        state.printers = qzPrinters;
-                        return state.printers;
-                    }
-                }
-            } catch (qzError) {}
-
+        } catch (error) {
+            console.error('Failed to get printers:', error);
+            emit('printers-error', { error: error.message });
             return [];
         }
     }
 
+    // Get printer for current path
     async function getPrinterForPath(path = window.location.pathname) {
+        // Check data attribute first
         const activeElement = document.activeElement;
         if (activeElement && activeElement.dataset && activeElement.dataset.qzPrinter) {
             return activeElement.dataset.qzPrinter;
         }
 
+        // Check localStorage cache
         if (state.settings.rememberPrinters) {
             const map = JSON.parse(
                 localStorage.getItem(CONFIG.STORAGE_KEYS.PRINTER_MAP) || '{}'
             );
 
+            // Exact match
             if (map[path]) {
                 return map[path];
             }
 
+            // Wildcard match
             for (const [key, printer] of Object.entries(map)) {
                 if (key.endsWith('/*') && path.startsWith(key.slice(0, -2))) {
                     return printer;
@@ -272,6 +282,7 @@
             }
         }
 
+        // Get from server
         try {
             const response = await fetch(`${CONFIG.ENDPOINT}/printer${encodeURIComponent(path)}`);
             if (response.ok) {
@@ -281,15 +292,26 @@
                 }
             }
         } catch (e) {
-            log('Failed to get printer from server:', e.message);
+            // Ignore error
         }
 
-        if (state.connected) {
+        // Get default from QZ Tray
+        if (state.connected || await connect()) {
             try {
-                const printers = await qz.printers.find();
-                if (printers && printers.length > 0) {
-                    const defaultPrinter = await qz.printers.getDefault();
-                    return defaultPrinter || printers[0];
+                const printers = await getPrinters();
+                if (printers.length > 0) {
+                    // Try to get system default
+                    try {
+                        const defaultPrinter = await qz.printers.getDefault();
+                        if (defaultPrinter) {
+                            return defaultPrinter;
+                        }
+                    } catch (e) {
+                        // Use first printer
+                    }
+
+                    const firstPrinter = printers[0];
+                    return typeof firstPrinter === 'string' ? firstPrinter : firstPrinter.name;
                 }
             } catch (e) {
                 console.error('Failed to get default printer:', e);
@@ -299,20 +321,20 @@
         return null;
     }
 
+    // Save printer for path
     async function savePrinterForPath(printer, path = window.location.pathname) {
         if (!printer) return;
 
+        // Save to localStorage
         if (state.settings.rememberPrinters) {
             const map = JSON.parse(
                 localStorage.getItem(CONFIG.STORAGE_KEYS.PRINTER_MAP) || '{}'
             );
             map[path] = printer;
-            localStorage.setItem(
-                CONFIG.STORAGE_KEYS.PRINTER_MAP,
-                JSON.stringify(map)
-            );
+            localStorage.setItem(CONFIG.STORAGE_KEYS.PRINTER_MAP, JSON.stringify(map));
         }
 
+        // Save to server (optional)
         try {
             await fetch(`${CONFIG.ENDPOINT}/printer`, {
                 method: 'POST',
@@ -333,6 +355,7 @@
         log(`Printer "${printer}" saved for path "${path}"`);
     }
 
+    // Convert blob to base64
     function blobToBase64(blob) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -345,21 +368,17 @@
         });
     }
 
+    // Fetch PDF from URL
     async function fetchPdf(url, attempt = 1) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(
-            () => controller.abort(),
-            CONFIG.PDF_TIMEOUT
-        );
+        const timeoutId = setTimeout(() => controller.abort(), CONFIG.PDF_TIMEOUT);
 
         try {
-            log(`Fetching PDF from: ${url} (attempt ${attempt})`);
+            log(`Fetching PDF: ${url}`);
 
             const headers = {
                 'Accept': 'application/pdf, */*',
                 'X-Requested-With': 'XMLHttpRequest',
-                'X-Print-Request': 'true',
-                'X-Print-Attempt': attempt.toString(),
             };
 
             const csrfToken = document.querySelector('meta[name="csrf-token"]');
@@ -376,17 +395,13 @@
             clearTimeout(timeoutId);
 
             if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                throw new Error(`HTTP ${response.status}`);
             }
 
             const contentType = response.headers.get('content-type') || '';
-            const contentDisposition = response.headers.get('content-disposition') || '';
 
-            const isPdf = contentType.includes('pdf') ||
-                contentDisposition.includes('.pdf') ||
-                contentDisposition.includes('attachment');
-
-            if (!isPdf) {
+            if (!contentType.includes('pdf')) {
+                // Check if it might be PDF anyway
                 const text = await response.text();
                 if (text.includes('%PDF') || text.includes('PDF')) {
                     log('PDF detected without proper headers');
@@ -399,29 +414,17 @@
             }
 
             const blob = await response.blob();
-            const base64Data = await blobToBase64(blob);
+            return await blobToBase64(blob);
 
-            log(`PDF fetched successfully (${blob.size} bytes)`);
-            return base64Data;
-
-        } catch (err) {
+        } catch (error) {
             clearTimeout(timeoutId);
-
-            if (err.name === 'AbortError') {
-                throw new Error('PDF download timeout');
-            }
-
-            throw err;
+            throw error;
         }
     }
 
-    function getCsrfToken() {
-        const meta = document.querySelector('meta[name="csrf-token"]');
-        return meta ? meta.getAttribute('content') : null;
-    }
-
+    // Main print function
     async function smartPrint(url, options = {}) {
-        const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const jobId = 'job_' + Date.now();
         const startTime = Date.now();
 
         const job = {
@@ -431,24 +434,23 @@
                 printer: options.printer || null,
                 type: options.type || 'pdf',
                 copies: parseInt(options.copies) || 1,
-                rawData: options.rawData || null,
                 ...options
             },
             status: 'queued',
-            path: window.location.pathname,
             startTime: startTime,
             attempts: 0,
         };
 
+        // Add to queue and process
         state.printQueue.push(job);
         emit('job-queued', { job });
-        log(`Job queued: ${jobId}`);
 
         processQueue();
 
         return jobId;
     }
 
+    // Process print queue
     async function processQueue() {
         if (state.isProcessing || state.printQueue.length === 0) {
             return;
@@ -458,47 +460,50 @@
 
         while (state.printQueue.length > 0) {
             const job = state.printQueue.shift();
-            state.currentJob = job;
-
             await processJob(job);
         }
 
-        state.currentJob = null;
         state.isProcessing = false;
     }
 
+    // Process individual job
     async function processJob(job) {
         job.attempts++;
         job.status = 'processing';
         emit('job-processing', { job });
 
         try {
-            log(`Processing job: ${job.id} (attempt ${job.attempts})`);
+            log(`Printing job ${job.id}...`);
 
+            // Ensure connected
             if (!state.connected && !(await connect())) {
                 throw new Error('Cannot connect to QZ Tray');
             }
 
-            const printer = job.options.printer || await getPrinterForPath(job.path);
+            // Get printer
+            const printer = job.options.printer || await getPrinterForPath();
             if (!printer) {
                 throw new Error('No printer selected');
             }
 
+            // Create QZ config
             const config = qz.configs.create(printer);
 
+            // Prepare print data
             let printData;
 
-            if (job.options.type === 'zpl' || job.options.type === 'escpos' || job.options.type === 'raw') {
+            if (job.options.type === 'zpl' || job.options.type === 'escpos') {
+                // Raw printing
                 printData = [{
                     type: 'raw',
-                    data: job.options.rawData || job.url,
+                    data: job.url, // For raw printing, URL contains the data
                     options: {
                         language: job.options.type === 'zpl' ? 'ZPL' : 'ESC/POS'
                     }
                 }];
             } else {
+                // PDF printing
                 const pdfData = await fetchPdf(job.url, job.attempts);
-
                 printData = [{
                     type: 'pdf',
                     format: 'base64',
@@ -506,57 +511,38 @@
                 }];
             }
 
+            // Set copies
             if (job.options.copies > 1) {
                 printData[0].copies = job.options.copies;
             }
 
-            const result = await qz.print(config, printData);
+            // Execute print
+            await qz.print(config, printData);
 
+            // Update job status
             job.status = 'completed';
-            job.endTime = Date.now();
-            job.duration = job.endTime - job.startTime;
-            job.result = result;
-
-            try {
-                await fetch(`${CONFIG.ENDPOINT}/print`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
-                    body: JSON.stringify({
-                        url: job.url,
-                        printer: printer,
-                        type: job.options.type,
-                        copies: job.options.copies,
-                        path: job.path,
-                        job_id: job.id,
-                    })
-                });
-            } catch (e) {
-                console.warn('Failed to notify server:', e);
-            }
+            job.duration = Date.now() - job.startTime;
 
             emit('job-completed', { job });
-            log(`Job completed: ${job.id} in ${job.duration}ms`);
+            log(`✅ Printed successfully in ${job.duration}ms`);
 
-        } catch (err) {
+        } catch (error) {
             job.status = 'failed';
-            job.error = err.message;
-            job.endTime = Date.now();
-            job.duration = job.endTime - job.startTime;
+            job.error = error.message;
+            job.duration = Date.now() - job.startTime;
 
-            emit('job-failed', { job, error: err.message });
-            console.error(`Job failed: ${job.id}`, err);
+            emit('job-failed', { job, error: error.message });
+            console.error(`Print failed: ${error.message}`);
 
+            // Retry logic
             if (job.attempts < CONFIG.MAX_RETRIES) {
                 log(`Retrying job ${job.id} (attempt ${job.attempts + 1})`);
                 state.printQueue.unshift(job);
 
-                await new Promise(resolve =>
-                    setTimeout(resolve, CONFIG.RETRY_DELAY * job.attempts)
-                );
+                // Wait before retry
+                await new Promise(resolve => setTimeout(resolve, 1000 * job.attempts));
             } else {
+                // Fallback to browser printing
                 if (state.settings.fallbackToBrowser) {
                     fallbackPrint(job);
                 }
@@ -564,6 +550,7 @@
         }
     }
 
+    // Fallback to browser printing
     function fallbackPrint(job) {
         log('Falling back to browser printing');
 
@@ -571,11 +558,7 @@
             const printWindow = window.open(job.url, '_blank');
             if (printWindow) {
                 printWindow.onload = function() {
-                    try {
-                        printWindow.print();
-                    } catch (e) {
-                        console.warn('Browser print failed:', e);
-                    }
+                    printWindow.print();
                 };
             }
         } else {
@@ -585,10 +568,11 @@
         emit('fallback-print', { job });
     }
 
+    // Setup event listeners
     function setupEventListeners() {
+        // Handle data-qz-print clicks
         document.addEventListener('click', function(event) {
             const element = event.target.closest('[data-qz-print]');
-
             if (!element) return;
 
             event.preventDefault();
@@ -605,6 +589,7 @@
             }
         });
 
+        // Hotkey for printer switching (Ctrl+Shift+P)
         if (state.settings.enableHotkey) {
             document.addEventListener('keydown', function(event) {
                 if (event.ctrlKey && event.shiftKey && event.key === 'P') {
@@ -615,32 +600,35 @@
         }
     }
 
+    // Show printer switcher
     async function showPrinterSwitcher() {
         if (!state.connected && !(await connect())) {
             if (state.settings.showNotifications) {
-                alert('Cannot connect to QZ Tray');
+                alert('Please connect to QZ Tray first');
             }
             return;
         }
 
-        if (state.printers.length === 0) {
-            await getPrinters();
+        const printers = await getPrinters();
+        if (printers.length === 0) {
+            alert('No printers found');
+            return;
         }
 
         const currentPrinter = await getPrinterForPath();
-        const printerNames = state.printers.map(p =>
-            typeof p === 'string' ? p : (p.name || p)
+        const printerList = printers.map(p =>
+            typeof p === 'string' ? p : p.name
         ).join('\n');
 
         const newPrinter = prompt(
-            `🖨️ Current Printer: ${currentPrinter || 'Not set'}\n\n` +
-            `Available Printers:\n${printerNames}\n\n` +
+            `Current Printer: ${currentPrinter || 'Not set'}\n\n` +
+            `Available Printers:\n${printerList}\n\n` +
             `Enter printer name:`,
             currentPrinter
         );
 
         if (newPrinter) {
-            const printerExists = state.printers.some(p =>
+            const printerExists = printers.some(p =>
                 (typeof p === 'string' && p === newPrinter) ||
                 (p.name && p.name === newPrinter)
             );
@@ -649,16 +637,15 @@
                 await savePrinterForPath(newPrinter);
 
                 if (state.settings.showNotifications) {
-                    alert(`✅ Printer "${newPrinter}" saved for this page`);
+                    alert(`Printer "${newPrinter}" saved for this page`);
                 }
             } else {
-                if (state.settings.showNotifications) {
-                    alert('❌ Printer not found in available printers');
-                }
+                alert('Printer not found');
             }
         }
     }
 
+    // Load settings
     function loadSettings() {
         try {
             const saved = localStorage.getItem(CONFIG.STORAGE_KEYS.SETTINGS);
@@ -670,17 +657,7 @@
         }
     }
 
-    function saveSettings() {
-        try {
-            localStorage.setItem(
-                CONFIG.STORAGE_KEYS.SETTINGS,
-                JSON.stringify(state.settings)
-            );
-        } catch (e) {
-            console.error('Failed to save settings:', e);
-        }
-    }
-
+    // Initialize auto-print elements
     function initAutoPrint() {
         const elements = document.querySelectorAll('[data-qz-auto-print]');
 
@@ -697,30 +674,38 @@
         });
     }
 
+    // Public API
     const SmartPrintAPI = {
+        // Print functions
         print: smartPrint,
 
+        // Raw printing
         printRaw: function(data, type = 'zpl', printer = null) {
-            return smartPrint(data, {
-                type: type,
-                printer: printer,
-                rawData: data,
-            });
+            // For raw printing, we need to handle data differently
+            // This would require a different approach
+            console.warn('printRaw requires custom implementation');
+            return null;
         },
 
         printZPL: function(zpl, printer = null) {
-            return this.printRaw(zpl, 'zpl', printer);
+            // ZPL printing would need special handling
+            console.warn('ZPL printing requires custom implementation');
+            return null;
         },
 
         printESC: function(escpos, printer = null) {
-            return this.printRaw(escpos, 'escpos', printer);
+            // ESC/POS printing would need special handling
+            console.warn('ESC/POS printing requires custom implementation');
+            return null;
         },
 
+        // Printer management
         getPrinters: getPrinters,
         getCurrentPrinter: () => getPrinterForPath(),
         setPrinter: savePrinterForPath,
         showPrinterSwitcher: showPrinterSwitcher,
 
+        // Connection
         connect: connect,
         disconnect: function() {
             if (state.connected && qz.websocket) {
@@ -733,30 +718,33 @@
         },
 
         isConnected: () => state.connected,
+
+        // Status
         getStatus: function() {
             return {
                 connected: state.connected,
                 printers: state.printers.length,
                 queueLength: state.printQueue.length,
-                isProcessing: state.isProcessing,
-                currentJob: state.currentJob,
+                version: CONFIG.VERSION,
             };
         },
 
+        // Queue
         getQueue: () => [...state.printQueue],
         clearQueue: function() {
             state.printQueue = [];
             emit('queue-cleared');
         },
 
+        // Settings
         getSettings: () => ({ ...state.settings }),
         updateSettings: function(newSettings) {
             state.settings = { ...state.settings, ...newSettings };
-            saveSettings();
-            emit('settings-updated', { settings: state.settings });
+            localStorage.setItem(CONFIG.STORAGE_KEYS.SETTINGS, JSON.stringify(state.settings));
             return state.settings;
         },
 
+        // Events
         on: function(event, callback) {
             if (!state.eventListeners.has(event)) {
                 state.eventListeners.set(event, []);
@@ -776,51 +764,61 @@
             return this;
         },
 
+        // Utilities
         clearCache: function() {
             Object.values(CONFIG.STORAGE_KEYS).forEach(key => {
                 localStorage.removeItem(key);
             });
             emit('cache-cleared');
-            log('Cache cleared');
         },
 
         version: CONFIG.VERSION,
     };
 
+    // Initialize
     async function initialize() {
         try {
+            log('Initializing Smart Print...');
+
+            // Load settings
             loadSettings();
+
+            // Wait for QZ Tray
             await waitForQz();
+
+            // Setup security
             setupSecurity();
+
+            // Setup event listeners
             setupEventListeners();
 
+            // Initialize auto-print
+            initAutoPrint();
+
+            // Emit ready event
+            emit('ready', { version: CONFIG.VERSION });
+            log('✅ Smart Print initialized');
+
+            // Auto-connect if enabled
             if (state.settings.autoConnect) {
                 await connect();
             }
 
-            if (state.connected) {
-                await getPrinters();
-            }
-
-            initAutoPrint();
-            emit('ready', { version: CONFIG.VERSION });
-            log('Smart-Print initialized successfully');
-
-        } catch (err) {
-            console.error('Initialization failed:', err);
-            emit('init-failed', { error: err.message });
+        } catch (error) {
+            console.error('Initialization failed:', error);
+            emit('init-failed', { error: error.message });
         }
     }
 
+    // Start initialization
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initialize);
     } else {
         initialize();
     }
 
+    // Expose to window
     window.SmartPrint = SmartPrintAPI;
     window.smartPrint = smartPrint;
-    window.smartPrintZPL = SmartPrintAPI.printZPL;
-    window.smartPrintESC = SmartPrintAPI.printESC;
 
 })();

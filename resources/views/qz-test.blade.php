@@ -1,115 +1,168 @@
-<!-- resources/views/qz-test.blade.php -->
 <!DOCTYPE html>
 <html>
 <head>
-    <meta name="csrf-token" content="{{ csrf_token() }}">
-    <title>QZ Tray Test</title>
+    <meta charset="utf-8">
+    <title>QZ Tray Test - Working</title>
     <style>
         body { font-family: Arial; padding: 20px; }
-        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        button { padding: 10px 15px; margin: 5px; font-size: 16px; }
+        .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
         .connected { background: #d4edda; color: #155724; }
         .disconnected { background: #f8d7da; color: #721c24; }
-        button { padding: 10px 15px; margin: 5px; }
+        .log { background: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 20px; max-height: 300px; overflow-y: auto; }
     </style>
+
+    <!-- Configuration FIRST -->
     <script>
         window.QZ_CONFIG = {
             endpoint: '/qz',
-            debug: true
+            debug: true,
+            autoConnect: false
         };
     </script>
+
+    <!-- QZ Tray library -->
     <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.5/qz-tray.min.js"></script>
-    <script src="{{ asset('vendor/qz-tray/smart-print.js') }}"></script>
+
+    <!-- Fixed Smart Print -->
+    <script src="{{asset('vendor/qz-tray/smart-print.js')}}"></script>
 </head>
 <body>
-<h1>QZ Tray Connection Test</h1>
+<h1>✅ QZ Tray Connection Test</h1>
 
 <div id="status" class="status disconnected">
-    🔴 Disconnected from QZ Tray
+    🔴 Status: Disconnected
 </div>
 
 <div>
     <button onclick="connectQz()">🔗 Connect to QZ Tray</button>
+    <button onclick="testConnection()">🔄 Test Connection</button>
     <button onclick="getPrinters()">🖨️ Get Printers</button>
-    <button onclick="testPrint()">🖨️ Test Print</button>
+    <button onclick="testPrint()">📄 Test Print</button>
     <button onclick="clearCache()">🗑️ Clear Cache</button>
 </div>
 
-<div id="output" style="margin-top:20px; padding:10px; background:#f5f5f5;"></div>
+<div id="log" class="log"></div>
 
 <script>
-    function log(msg) {
-        const output = document.getElementById('output');
-        output.innerHTML += `<div>${new Date().toLocaleTimeString()}: ${msg}</div>`;
-        output.scrollTop = output.scrollHeight;
+    function log(msg, type = 'info') {
+        const logDiv = document.getElementById('log');
+        const time = new Date().toLocaleTimeString();
+        const color = type === 'error' ? 'red' : type === 'success' ? 'green' : 'black';
+        logDiv.innerHTML += `<div style="color:${color}">${time}: ${msg}</div>`;
+        logDiv.scrollTop = logDiv.scrollHeight;
     }
 
     function updateStatus(connected) {
         const status = document.getElementById('status');
         if (connected) {
             status.className = 'status connected';
-            status.innerHTML = '🟢 Connected to QZ Tray';
+            status.innerHTML = '🟢 Status: Connected to QZ Tray';
         } else {
             status.className = 'status disconnected';
-            status.innerHTML = '🔴 Disconnected from QZ Tray';
+            status.innerHTML = '🔴 Status: Disconnected';
         }
     }
 
     async function connectQz() {
         log('Connecting to QZ Tray...');
-        const connected = await SmartPrint.connect();
-        updateStatus(connected);
-        log(connected ? '✅ Connected successfully!' : '❌ Connection failed');
+        try {
+            const connected = await SmartPrint.connect();
+            updateStatus(connected);
+            log(connected ? '✅ Connected successfully!' : '❌ Connection failed');
+            return connected;
+        } catch (err) {
+            log(`❌ Error: ${err.message}`, 'error');
+            return false;
+        }
+    }
+
+    async function testConnection() {
+        log('Testing connection...');
+        const status = SmartPrint.getStatus();
+        log(`Connection: ${status.connected ? '✅ Connected' : '❌ Disconnected'}`);
+        log(`Printers cached: ${status.printers}`);
+        log(`Queue length: ${status.queueLength}`);
+
+        // Try to connect if not connected
+        if (!status.connected) {
+            return await connectQz();
+        }
+        return true;
     }
 
     async function getPrinters() {
-        log('Fetching printers...');
+        log('Getting printers...');
         try {
             const printers = await SmartPrint.getPrinters();
-            log(`Found ${printers.length} printer(s):`);
-            printers.forEach(p => log(` - ${typeof p === 'string' ? p : p.name}`));
-        } catch (e) {
-            log(`Error: ${e.message}`);
+            if (printers.length === 0) {
+                log('❌ No printers found');
+            } else {
+                log(`✅ Found ${printers.length} printer(s):`);
+                printers.forEach(p => {
+                    const name = typeof p === 'string' ? p : (p.name || 'Unknown');
+                    log(`   - ${name}`);
+                });
+
+                // Auto-select first printer
+                const firstPrinter = printers[0];
+                const printerName = typeof firstPrinter === 'string' ? firstPrinter : firstPrinter.name;
+                await SmartPrint.setPrinter(printerName);
+                log(`✅ Set default printer to: ${printerName}`);
+            }
+        } catch (err) {
+            log(`❌ Error getting printers: ${err.message}`, 'error');
         }
     }
 
     async function testPrint() {
         log('Testing print...');
-        try {
-            const printers = await SmartPrint.getPrinters();
-            if (printers.length === 0) {
-                log('❌ No printers found');
+
+        // First check connection
+        if (!SmartPrint.isConnected()) {
+            log('Not connected. Connecting first...');
+            const connected = await connectQz();
+            if (!connected) {
+                log('❌ Cannot connect to QZ Tray', 'error');
                 return;
             }
+        }
 
-            // Create a simple test PDF
-            const testWindow = window.open('', '_blank');
-            testWindow.document.write(`
-                    <html>
-                    <body>
-                        <h1>QZ Tray Test Document</h1>
-                        <p>Generated: ${new Date().toLocaleString()}</p>
-                        <p>If you can see this, printing works!</p>
-                    </body>
-                    </html>
-                `);
-            testWindow.document.close();
+        // Get printers
+        const printers = await SmartPrint.getPrinters();
+        if (printers.length === 0) {
+            log('❌ No printers available', 'error');
+            return;
+        }
 
-            const printData = `
-                    data:text/html,<html>
-                    <body style="font-family:Arial;padding:20px;">
-                        <h1>QZ Tray Test</h1>
-                        <p>Time: ${new Date().toLocaleString()}</p>
-                        <p>✅ Test successful!</p>
-                    </body>
-                    </html>
-                `;
+        // Create a simple test document
+        const testHtml = `
+            <html>
+            <body style="font-family:Arial;padding:20px;">
+                <h1>✅ QZ Tray Test</h1>
+                <p>This is a test document printed from QZ Tray.</p>
+                <p>Time: ${new Date().toLocaleString()}</p>
+                <p>If you can see this, QZ Tray is working correctly!</p>
+            </body>
+            </html>
+        `;
 
-            const jobId = await smartPrint(printData, {
-                printer: printers[0]
+        // Convert to data URL
+        const testUrl = 'data:text/html,' + encodeURIComponent(testHtml);
+
+        try {
+            const printerName = typeof printers[0] === 'string' ? printers[0] : printers[0].name;
+            log(`Printing to: ${printerName}`);
+
+            const jobId = await smartPrint(testUrl, {
+                printer: printerName,
+                copies: 1
             });
-            log(`✅ Print job started: ${jobId}`);
-        } catch (e) {
-            log(`❌ Print error: ${e.message}`);
+
+            log(`✅ Print job started: ${jobId}`, 'success');
+
+        } catch (err) {
+            log(`❌ Print error: ${err.message}`, 'error');
         }
     }
 
@@ -119,14 +172,14 @@
         log('✅ Cache cleared');
     }
 
-    // Auto-connect
-    document.addEventListener('DOMContentLoaded', async () => {
-        log('Page loaded, initializing...');
+    // Initialize
+    document.addEventListener('DOMContentLoaded', function() {
+        log('Page loaded. Smart Print initialized.');
 
-        // Listen for connection events
+        // Listen for events
         SmartPrint.on('connected', () => {
             updateStatus(true);
-            log('Event: Connected to QZ Tray');
+            log('Event: Connected to QZ Tray', 'success');
         });
 
         SmartPrint.on('disconnected', () => {
@@ -135,12 +188,17 @@
         });
 
         SmartPrint.on('job-completed', (data) => {
-            log(`Event: Print job completed: ${data.job.id}`);
+            log(`Event: Print job completed: ${data.job.id}`, 'success');
         });
 
         SmartPrint.on('job-failed', (data) => {
-            log(`Event: Print job failed: ${data.error}`);
+            log(`Event: Print job failed: ${data.error}`, 'error');
         });
+
+        // Auto-test after 1 second
+        setTimeout(() => {
+            testConnection();
+        }, 1000);
     });
 </script>
 </body>

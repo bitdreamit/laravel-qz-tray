@@ -4,10 +4,9 @@ namespace Bitdreamit\QzTray\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Routing\Controller;
 
 class QzSecurityController extends Controller
 {
@@ -18,7 +17,7 @@ class QzSecurityController extends Controller
     {
         $certPath = config('qz-tray.cert_path');
 
-        if (!file_exists($certPath)) {
+        if (! file_exists($certPath)) {
             return response('Certificate not found', 404);
         }
 
@@ -27,7 +26,7 @@ class QzSecurityController extends Controller
         return response($cert, 200, [
             'Content-Type' => 'application/x-x509-ca-cert',
             'Content-Disposition' => 'inline; filename="qz-tray-cert.pem"',
-            'Cache-Control' => 'public, max-age=' . config('qz-tray.cert_ttl', 3600),
+            'Cache-Control' => 'public, max-age='.config('qz-tray.cert_ttl', 3600),
         ]);
     }
 
@@ -43,7 +42,7 @@ class QzSecurityController extends Controller
         $data = $request->input('data');
         $keyPath = config('qz-tray.key_path');
 
-        if (!file_exists($keyPath)) {
+        if (! file_exists($keyPath)) {
             return response('Private key not found', 500);
         }
 
@@ -166,7 +165,7 @@ class QzSecurityController extends Controller
             $this->getPrinterForPath($path);
 
         // Generate job ID
-        $jobId = 'qz_' . uniqid() . '_' . time();
+        $jobId = 'qz_'.uniqid().'_'.time();
 
         // Log print job
         if (config('qz-tray.logging.enabled')) {
@@ -255,7 +254,7 @@ class QzSecurityController extends Controller
         return response()->json([
             'status' => 'healthy',
             'timestamp' => now()->toIso8601String(),
-            'memory_usage' => memory_get_usage(true) / 1024 / 1024 . ' MB',
+            'memory_usage' => memory_get_usage(true) / 1024 / 1024 .' MB',
         ]);
     }
 
@@ -270,14 +269,14 @@ class QzSecurityController extends Controller
             'macos' => 'qz-tray-macos.pkg',
         ]);
 
-        if (!isset($installers[$os])) {
+        if (! isset($installers[$os])) {
             abort(404, 'Installer not found for this OS');
         }
 
         $filename = $installers[$os];
         $path = public_path("vendor/qz-tray/installers/{$filename}");
 
-        if (!file_exists($path)) {
+        if (! file_exists($path)) {
             abort(404, 'Installer file not found');
         }
 
