@@ -1,7 +1,7 @@
 /**
  * Laravel QZ Tray - Smart Print
  * Official QZ Tray API Integration
- * Version: 2.1.0 (Official API Compliant)
+ * Version: 2.2.0 (Official Pattern)
  */
 (function() {
     'use strict';
@@ -9,7 +9,7 @@
     const CONFIG = {
         ENDPOINT: (window.QZ_CONFIG && window.QZ_CONFIG.endpoint) || '/qz',
         DEBUG: (window.QZ_CONFIG && window.QZ_CONFIG.debug) || false,
-        VERSION: '2.1.0',
+        VERSION: '2.2.0',
         PRINT_TIMEOUT: 30000,
         PDF_TIMEOUT: 30000,
         MAX_RETRIES: 2,
@@ -38,6 +38,7 @@
         isProcessing: false,
         currentJob: null,
         eventListeners: new Map(),
+        qzInitialized: false
     };
 
     function log(...args) {
@@ -64,135 +65,189 @@
         log(`Event emitted: ${event}`, data);
     }
 
-    // Wait for QZ Tray library
+    // Wait for QZ Tray library to be fully loaded
     async function waitForQz() {
         return new Promise((resolve) => {
-            if (typeof qz !== 'undefined' && qz.security) {
+            if (window.qz && window.qz.version) {
+                log('QZ Tray library loaded:', qz.version);
                 resolve();
                 return;
             }
 
-            const maxAttempts = 30;
+            const maxAttempts = 50;
             let attempts = 0;
 
             const check = setInterval(() => {
                 attempts++;
-
-                if (typeof qz !== 'undefined' && qz.security) {
+                if (window.qz && window.qz.version) {
                     clearInterval(check);
+                    log('QZ Tray library loaded after', attempts * 100, 'ms');
                     resolve();
                 } else if (attempts >= maxAttempts) {
                     clearInterval(check);
-                    console.error('QZ Tray library not loaded');
-                    resolve();
+                    log('QZ Tray library not found after timeout');
+                    resolve(); // Continue anyway
                 }
             }, 100);
         });
     }
 
-    // Setup security certificates (Official QZ Tray way)
+    // Setup security certificates - OFFICIAL WAY
     function setupSecurity() {
         log('Setting up QZ Tray security...');
 
-        qz.security.setCertificatePromise(function() {
-            return new Promise((resolve, reject) => {
-                // Try cache first
-                const cached = localStorage.getItem(CONFIG.STORAGE_KEYS.CERTIFICATE);
-                if (cached) {
-                    log('Using cached certificate');
-                    resolve(cached);
-                    return;
-                }
+        // Get certificate - Official pattern from demo.qz.io
+        qz.security.setCertificatePromise(function(resolve, reject) {
+            // Check cache first
+            const cached = localStorage.getItem(CONFIG.STORAGE_KEYS.CERTIFICATE);
+            if (cached) {
+                log('Using cached certificate');
+                resolve(cached);
+                return;
+            }
 
-                log('Fetching certificate from server');
+            log('Fetching certificate from server');
 
-                fetch(`${CONFIG.ENDPOINT}/certificate`)
-                    .then(response => {
-                        if (!response.ok) {
-                            throw new Error(`HTTP ${response.status}`);
-                        }
-                        return response.text();
-                    })
-                    .then(certificate => {
-                        localStorage.setItem(CONFIG.STORAGE_KEYS.CERTIFICATE, certificate);
-                        resolve(certificate);
-                    })
-                    .catch(error => {
-                        console.error('Failed to load certificate:', error);
-                        reject(error);
-                    });
-            });
+            // Fetch certificate from your server
+            fetch(`${CONFIG.ENDPOINT}/certificate`)
+                .then(function(response) {
+                    if (!response.ok) {
+                        throw new Error('Certificate fetch failed: ' + response.status);
+                    }
+                    return response.text();
+                })
+                .then(function(certificate) {
+                    // Store in cache
+                    localStorage.setItem(CONFIG.STORAGE_KEYS.CERTIFICATE, certificate);
+                    resolve(certificate);
+                })
+                .catch(function(err) {
+                    console.error('Certificate fetch error:', err);
+                    reject(err);
+                });
         });
 
-        qz.security.setSignaturePromise(function (data) {
-            log('Requesting signature');
+        // Get signature - Official pattern from demo.qz.io
+        qz.security.setSignaturePromise(function(toSign) {
+            log('Requesting signature for:', toSign.substring(0, 50) + '...');
 
-            return fetch(CONFIG.ENDPOINT + '/sign', {
+            return fetch(`${CONFIG.ENDPOINT}/sign`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Requested-With': 'XMLHttpRequest',
-                    'X-CSRF-TOKEN':
-                        document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
                 },
-                body: JSON.stringify({ data: data })
+                body: JSON.stringify({ data: toSign })
             })
-                .then(function (response) {
+                .then(function(response) {
                     if (!response.ok) {
-                        throw new Error('HTTP ' + response.status);
+                        throw new Error('Signature failed: ' + response.status);
                     }
                     return response.text();
+                })
+                .then(function(signature) {
+                    log('Signature received');
+                    return signature;
+                })
+                .catch(function(err) {
+                    console.error('Signature error:', err);
+                    throw err;
                 });
         });
 
         log('Security setup complete');
+        state.qzInitialized = true;
     }
 
-    // Connect to QZ Tray (Official API)
-    async function connect() {
-        if (state.connected) {
-            log('Already connected to QZ Tray');
-            return true;
-        }
-
-        emit('connecting');
-
+    // Check connection status - SIMPLE CHECK
+    function isConnected() {
         try {
-            log('Connecting to QZ Tray...');
-
-            // Use official QZ Tray connection method
-            // Note: QZ Tray handles its own retry logic and port discovery
-            await qz.websocket.connect();
-
-            state.connected = true;
-            emit('connected');
-            log('✅ Connected to QZ Tray');
-
-            return true;
-
-        } catch (error) {
-            console.error('Connection failed:', error.message);
-
-            // Check if already connected (QZ Tray might throw error but still be connected)
-            try {
-                // Try to get printers - if this works, we're connected
-                const printers = await qz.printers.find();
-                if (printers && printers.length > 0) {
-                    state.connected = true;
-                    emit('connected');
-                    log('✅ QZ Tray connection verified via printer list');
-                    return true;
-                }
-            } catch (e) {
-                // Not connected
-            }
-
-            emit('connection-failed', { error: error.message });
+            return qz.websocket.isActive();
+        } catch (e) {
             return false;
         }
     }
 
-    // Get printers (with caching)
+    // Connect to QZ Tray - OFFICIAL SIMPLE WAY
+    async function connect() {
+        // If already connected, return true
+        if (isConnected()) {
+            if (!state.connected) {
+                state.connected = true;
+                emit('connected');
+                log('✅ QZ Tray already connected');
+            }
+            return true;
+        }
+
+        emit('connecting');
+        log('Connecting to QZ Tray...');
+
+        try {
+            // Use QZ Tray's built-in connect method
+            // It handles retries and port discovery automatically
+            await qz.websocket.connect();
+
+            // Set up connection event listeners
+            qz.websocket.on('open', function() {
+                state.connected = true;
+                emit('connected');
+                log('✅ Connected to QZ Tray');
+            });
+
+            qz.websocket.on('close', function(event) {
+                state.connected = false;
+                emit('disconnected');
+                log('Disconnected from QZ Tray');
+            });
+
+            qz.websocket.on('error', function(event) {
+                log('QZ Tray WebSocket error:', event);
+                emit('connection-error', { error: event });
+            });
+
+            // Wait a moment for connection to establish
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            // Verify connection
+            if (isConnected()) {
+                state.connected = true;
+                emit('connected');
+                return true;
+            } else {
+                // Connection might still be in progress
+                // Wait a bit more and check again
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                if (isConnected()) {
+                    state.connected = true;
+                    emit('connected');
+                    log('✅ Connected to QZ Tray (delayed)');
+                    return true;
+                } else {
+                    throw new Error('Connection not established');
+                }
+            }
+
+        } catch (error) {
+            console.error('Connection error:', error);
+            emit('connection-failed', { error: error.message });
+
+            // Check if we connected despite the error
+            await new Promise(resolve => setTimeout(resolve, 500));
+            if (isConnected()) {
+                state.connected = true;
+                emit('connected');
+                log('✅ QZ Tray connected (recovered from error)');
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    // Get printers - SIMPLE OFFICIAL WAY
     async function getPrinters() {
         // Check cache first
         if (state.settings.cachePrinters) {
@@ -214,12 +269,14 @@
         try {
             log('Getting printers from QZ Tray...');
 
-            // Ensure connected
-            if (!state.connected && !(await connect())) {
-                throw new Error('Not connected to QZ Tray');
+            // Ensure we're connected
+            if (!isConnected()) {
+                if (!(await connect())) {
+                    throw new Error('Not connected to QZ Tray');
+                }
             }
 
-            // Get printers from QZ Tray
+            // Get printers - QZ Tray handles everything
             const qzPrinters = await qz.printers.find();
 
             if (qzPrinters && qzPrinters.length > 0) {
@@ -239,12 +296,40 @@
                 return state.printers;
             }
 
+            log('No printers found');
             return [];
 
         } catch (error) {
             console.error('Failed to get printers:', error);
             emit('printers-error', { error: error.message });
+
+            // Return cached printers if available
+            const cached = localStorage.getItem(CONFIG.STORAGE_KEYS.PRINTERS);
+            if (cached) {
+                try {
+                    const data = JSON.parse(cached);
+                    return data.printers || [];
+                } catch (e) {
+                    // Ignore
+                }
+            }
+
             return [];
+        }
+    }
+
+    // Get default printer
+    async function getDefaultPrinter() {
+        try {
+            if (!isConnected()) {
+                await connect();
+            }
+
+            const defaultPrinter = await qz.printers.getDefault();
+            return defaultPrinter;
+        } catch (error) {
+            log('Could not get default printer:', error.message);
+            return null;
         }
     }
 
@@ -288,27 +373,17 @@
             // Ignore error
         }
 
-        // Get default from QZ Tray
-        if (state.connected || await connect()) {
-            try {
-                const printers = await getPrinters();
-                if (printers.length > 0) {
-                    // Try to get system default
-                    try {
-                        const defaultPrinter = await qz.printers.getDefault();
-                        if (defaultPrinter) {
-                            return defaultPrinter;
-                        }
-                    } catch (e) {
-                        // Use first printer
-                    }
+        // Get default printer
+        const defaultPrinter = await getDefaultPrinter();
+        if (defaultPrinter) {
+            return defaultPrinter;
+        }
 
-                    const firstPrinter = printers[0];
-                    return typeof firstPrinter === 'string' ? firstPrinter : firstPrinter.name;
-                }
-            } catch (e) {
-                console.error('Failed to get default printer:', e);
-            }
+        // Get first available printer
+        const printers = await getPrinters();
+        if (printers.length > 0) {
+            const firstPrinter = printers[0];
+            return typeof firstPrinter === 'string' ? firstPrinter : firstPrinter.name;
         }
 
         return null;
@@ -334,6 +409,7 @@
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
                 },
                 body: JSON.stringify({
                     printer: printer,
@@ -394,7 +470,6 @@
             const contentType = response.headers.get('content-type') || '';
 
             if (!contentType.includes('pdf')) {
-                // Check if it might be PDF anyway
                 const text = await response.text();
                 if (text.includes('%PDF') || text.includes('PDF')) {
                     log('PDF detected without proper headers');
@@ -438,7 +513,10 @@
         state.printQueue.push(job);
         emit('job-queued', { job });
 
-        processQueue();
+        // Process queue
+        if (!state.isProcessing) {
+            processQueue();
+        }
 
         return jobId;
     }
@@ -468,9 +546,11 @@
         try {
             log(`Printing job ${job.id}...`);
 
-            // Ensure connected
-            if (!state.connected && !(await connect())) {
-                throw new Error('Cannot connect to QZ Tray');
+            // Ensure connection
+            if (!isConnected()) {
+                if (!(await connect())) {
+                    throw new Error('Cannot connect to QZ Tray');
+                }
             }
 
             // Get printer
@@ -489,7 +569,7 @@
                 // Raw printing
                 printData = [{
                     type: 'raw',
-                    data: job.url, // For raw printing, URL contains the data
+                    data: job.url,
                     options: {
                         language: job.options.type === 'zpl' ? 'ZPL' : 'ESC/POS'
                     }
@@ -531,14 +611,9 @@
             if (job.attempts < CONFIG.MAX_RETRIES) {
                 log(`Retrying job ${job.id} (attempt ${job.attempts + 1})`);
                 state.printQueue.unshift(job);
-
-                // Wait before retry
                 await new Promise(resolve => setTimeout(resolve, 1000 * job.attempts));
-            } else {
-                // Fallback to browser printing
-                if (state.settings.fallbackToBrowser) {
-                    fallbackPrint(job);
-                }
+            } else if (state.settings.fallbackToBrowser) {
+                fallbackPrint(job);
             }
         }
     }
@@ -595,7 +670,7 @@
 
     // Show printer switcher
     async function showPrinterSwitcher() {
-        if (!state.connected && !(await connect())) {
+        if (!isConnected() && !(await connect())) {
             if (state.settings.showNotifications) {
                 alert('Please connect to QZ Tray first');
             }
@@ -672,26 +747,6 @@
         // Print functions
         print: smartPrint,
 
-        // Raw printing
-        printRaw: function(data, type = 'zpl', printer = null) {
-            // For raw printing, we need to handle data differently
-            // This would require a different approach
-            console.warn('printRaw requires custom implementation');
-            return null;
-        },
-
-        printZPL: function(zpl, printer = null) {
-            // ZPL printing would need special handling
-            console.warn('ZPL printing requires custom implementation');
-            return null;
-        },
-
-        printESC: function(escpos, printer = null) {
-            // ESC/POS printing would need special handling
-            console.warn('ESC/POS printing requires custom implementation');
-            return null;
-        },
-
         // Printer management
         getPrinters: getPrinters,
         getCurrentPrinter: () => getPrinterForPath(),
@@ -701,24 +756,26 @@
         // Connection
         connect: connect,
         disconnect: function() {
-            if (state.connected && qz.websocket) {
+            state.connected = false;
+
+            if (qz && qz.websocket) {
                 return qz.websocket.disconnect().then(() => {
-                    state.connected = false;
                     emit('disconnected');
                 });
             }
             return Promise.resolve();
         },
 
-        isConnected: () => state.connected,
+        isConnected: isConnected,
 
         // Status
         getStatus: function() {
             return {
-                connected: state.connected,
+                connected: isConnected(),
                 printers: state.printers.length,
                 queueLength: state.printQueue.length,
                 version: CONFIG.VERSION,
+                qzInitialized: state.qzInitialized
             };
         },
 
@@ -734,6 +791,7 @@
         updateSettings: function(newSettings) {
             state.settings = { ...state.settings, ...newSettings };
             localStorage.setItem(CONFIG.STORAGE_KEYS.SETTINGS, JSON.stringify(state.settings));
+            emit('settings-updated', { settings: state.settings });
             return state.settings;
         },
 
@@ -762,6 +820,8 @@
             Object.values(CONFIG.STORAGE_KEYS).forEach(key => {
                 localStorage.removeItem(key);
             });
+            state.printers = [];
+            state.connected = false;
             emit('cache-cleared');
         },
 
@@ -776,8 +836,14 @@
             // Load settings
             loadSettings();
 
-            // Wait for QZ Tray
+            // Wait for QZ Tray library
+            log('Waiting for QZ Tray library...');
             await waitForQz();
+
+            // Check if QZ is available
+            if (!window.qz) {
+                throw new Error('QZ Tray library not found');
+            }
 
             // Setup security
             setupSecurity();
@@ -794,7 +860,13 @@
 
             // Auto-connect if enabled
             if (state.settings.autoConnect) {
-                await connect();
+                setTimeout(async () => {
+                    try {
+                        await connect();
+                    } catch (error) {
+                        log('Auto-connect failed:', error.message);
+                    }
+                }, 1000);
             }
 
         } catch (error) {
@@ -810,7 +882,7 @@
         initialize();
     }
 
-    // Expose to window
+    // EXPOSE TO WINDOW OBJECT
     window.SmartPrint = SmartPrintAPI;
     window.smartPrint = smartPrint;
 

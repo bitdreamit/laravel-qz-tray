@@ -15,19 +15,27 @@ class QzSecurityController extends Controller
      */
     public function certificate(): Response
     {
-        $certPath = config('qz-tray.cert_path');
+        $certPath = config('qz-tray.cert_path', storage_path('app/qz/certificate.txt'));
+
+        if (! is_readable($certPath)) {
+            // Generate certificate if not exists
+            $this->generateCertificate();
+        }
 
         if (! is_readable($certPath)) {
             return response('Certificate not found', 404);
         }
 
+        $certificate = file_get_contents($certPath);
+
         return response(
-            file_get_contents($certPath),
+            $certificate,
             200,
             [
-                'Content-Type' => 'application/x-x509-ca-cert',
-                'Content-Disposition' => 'inline; filename="qz-tray-cert.pem"',
-                'Cache-Control' => 'public, max-age='.config('qz-tray.cert_ttl', 3600),
+                'Content-Type' => 'text/plain',
+                'Content-Length' => strlen($certificate),
+                'Cache-Control' => 'no-store, no-cache, must-revalidate',
+                'Pragma' => 'no-cache',
             ]
         );
     }
@@ -35,47 +43,66 @@ class QzSecurityController extends Controller
     /**
      * Sign data for QZ Tray
      *
-     * IMPORTANT:
-     * - Must return RAW base64 string
-     * - No JSON
-     * - No debug output
+     * IMPORTANT: Must return RAW base64 string
      */
     public function sign(Request $request): Response
     {
-        $request->validate([
-            'data' => ['required', 'string'],
-        ]);
+        // Accept both JSON and form data
+        if ($request->isJson()) {
+            $data = $request->json('data');
+        } else {
+            $data = $request->input('data');
+        }
 
-        $keyPath = config('qz-tray.key_path');
+        if (empty($data)) {
+            return response('Missing data parameter', 400);
+        }
+
+        $keyPath = config('qz-tray.key_path', storage_path('app/qz/private-key.pem'));
 
         if (! is_readable($keyPath)) {
+            Log::error('QZ Tray private key not found at: '.$keyPath);
+
             return response('Private key not found', 500);
         }
 
         $privateKeyContent = file_get_contents($keyPath);
-
         $privateKey = openssl_pkey_get_private($privateKeyContent);
 
         if ($privateKey === false) {
-            return response('Invalid private key', 500);
+            Log::error('QZ Tray invalid private key format');
+
+            return response('Invalid private key format', 500);
         }
 
-        $data = $request->input('data');
-
         $signature = '';
+
+        // CRITICAL FIX: Use OPENSSL_ALGO_SHA512 (not SHA256)
         $success = openssl_sign(
             $data,
             $signature,
             $privateKey,
-            OPENSSL_ALGO_SHA256
+            OPENSSL_ALGO_SHA512  // CHANGED FROM SHA256
         );
 
+        openssl_free_key($privateKey);
+
         if (! $success) {
+            Log::error('QZ Tray signing failed for data: '.substr($data, 0, 50));
+
             return response('Signing failed', 500);
         }
 
-        return response(base64_encode($signature), 200, [
+        $base64Signature = base64_encode($signature);
+
+        Log::debug('QZ Tray signature generated', [
+            'data_length' => strlen($data),
+            'signature_length' => strlen($base64Signature),
+        ]);
+
+        return response($base64Signature, 200, [
             'Content-Type' => 'text/plain',
+            'Content-Length' => strlen($base64Signature),
         ]);
     }
 
@@ -84,32 +111,12 @@ class QzSecurityController extends Controller
      */
     public function printers(Request $request): \Illuminate\Http\JsonResponse
     {
-        $cacheKey = 'qz.printers.list';
-
-        if (Cache::has($cacheKey)) {
-            return response()->json([
-                'success' => true,
-                'printers' => Cache::get($cacheKey),
-                'cached' => true,
-                'timestamp' => now()->toIso8601String(),
-            ]);
-        }
-
-        // Placeholder printers
-        $printers = [
-            ['name' => 'Receipt Printer', 'type' => 'thermal', 'default' => true],
-            ['name' => 'Label Printer', 'type' => 'zpl', 'default' => false],
-            ['name' => 'Invoice Printer', 'type' => 'laser', 'default' => false],
-            ['name' => 'Shipping Label', 'type' => 'zpl', 'default' => false],
-        ];
-
-        Cache::put($cacheKey, $printers, now()->addMinutes(5));
-
+        // This endpoint is for web UI, not for QZ Tray
+        // QZ Tray gets printers directly via WebSocket
         return response()->json([
             'success' => true,
-            'printers' => $printers,
-            'cached' => false,
-            'timestamp' => now()->toIso8601String(),
+            'message' => 'Use QZ Tray WebSocket connection to get printers',
+            'note' => 'This endpoint is for UI display only',
         ]);
     }
 
@@ -128,18 +135,10 @@ class QzSecurityController extends Controller
 
         // Store in cache
         $cacheKey = "qz.printer.{$path}";
-        Cache::put($cacheKey, $printer, config('qz-tray.printer_cache_duration'));
+        Cache::put($cacheKey, $printer, config('qz-tray.printer_cache_duration', 3600));
 
         // Store in session for immediate use
         session()->put($cacheKey, $printer);
-
-        // If user is authenticated, store in database
-        if ($user = $request->user()) {
-            $user->settings()->updateOrCreate(
-                ['key' => "qz_printer_{$path}"],
-                ['value' => $printer]
-            );
-        }
 
         return response()->json([
             'success' => true,
@@ -168,104 +167,26 @@ class QzSecurityController extends Controller
     }
 
     /**
-     * Print document
-     */
-    public function print(Request $request): \Illuminate\Http\JsonResponse
-    {
-        $request->validate([
-            'url' => 'required|url',
-            'printer' => 'nullable|string',
-            'type' => 'in:pdf,raw,zpl,escpos',
-            'copies' => 'integer|min:1|max:10',
-        ]);
-
-        $url = $request->input('url');
-        $type = $request->input('type', 'pdf');
-        $copies = $request->input('copies', 1);
-
-        // Get printer for current path
-        $path = $request->input('path', $request->path());
-        $printer = $request->input('printer') ?:
-            $this->getPrinterForPath($path);
-
-        // Generate job ID
-        $jobId = 'qz_'.uniqid().'_'.time();
-
-        // Log print job
-        if (config('qz-tray.logging.enabled')) {
-            Log::channel(config('qz-tray.logging.channel'))->info('Print job created', [
-                'job_id' => $jobId,
-                'url' => $url,
-                'printer' => $printer,
-                'type' => $type,
-                'copies' => $copies,
-                'user_ip' => $request->ip(),
-                'user_agent' => $request->userAgent(),
-            ]);
-        }
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Print job created',
-            'job_id' => $jobId,
-            'printer' => $printer,
-            'type' => $type,
-            'copies' => $copies,
-            'queued_at' => now()->toIso8601String(),
-        ]);
-    }
-
-    /**
-     * Get print jobs
-     */
-    public function jobs(Request $request): \Illuminate\Http\JsonResponse
-    {
-        $jobs = Cache::get('qz.print.jobs', []);
-
-        return response()->json([
-            'success' => true,
-            'jobs' => $jobs,
-            'total' => count($jobs),
-        ]);
-    }
-
-    /**
-     * Cancel print job
-     */
-    public function cancelJob(Request $request, string $id): \Illuminate\Http\JsonResponse
-    {
-        $jobs = Cache::get('qz.print.jobs', []);
-
-        if (isset($jobs[$id])) {
-            unset($jobs[$id]);
-            Cache::put('qz.print.jobs', $jobs, now()->addHour());
-
-            return response()->json([
-                'success' => true,
-                'message' => "Job {$id} cancelled",
-            ]);
-        }
-
-        return response()->json([
-            'success' => false,
-            'message' => "Job {$id} not found",
-        ], 404);
-    }
-
-    /**
      * Get QZ Tray status
      */
     public function status(): \Illuminate\Http\JsonResponse
     {
-        $certExists = file_exists(config('qz-tray.cert_path'));
-        $keyExists = file_exists(config('qz-tray.key_path'));
+        $certPath = config('qz-tray.cert_path', storage_path('app/qz/certificate.txt'));
+        $keyPath = config('qz-tray.key_path', storage_path('app/qz/private-key.pem'));
+
+        $certExists = is_readable($certPath);
+        $keyExists = is_readable($keyPath);
 
         return response()->json([
             'success' => true,
             'status' => 'operational',
             'certificate' => $certExists ? 'valid' : 'missing',
             'private_key' => $keyExists ? 'valid' : 'missing',
-            'version' => '1.0.0',
+            'endpoints' => [
+                'certificate' => url('/qz/certificate'),
+                'sign' => url('/qz/sign'),
+            ],
+            'version' => '1.1.0',
             'timestamp' => now()->toIso8601String(),
         ]);
     }
@@ -277,121 +198,152 @@ class QzSecurityController extends Controller
     {
         return response()->json([
             'status' => 'healthy',
+            'service' => 'qz-tray',
             'timestamp' => now()->toIso8601String(),
-            'memory_usage' => memory_get_usage(true) / 1024 / 1024 .' MB',
         ]);
     }
 
     /**
-     * Download installer
+     * Generate SSL certificate and private key
      */
-    public function installer(Request $request, string $os): \Illuminate\Http\Response
+    public function generateCertificate()
     {
-        $installers = config('qz-tray.installers', [
-            'windows' => 'qz-tray-windows.exe',
-            'linux' => 'qz-tray-linux.deb',
-            'macos' => 'qz-tray-macos.pkg',
-        ]);
+        $certDir = dirname(config('qz-tray.cert_path', storage_path('app/qz/certificate.txt')));
 
-        if (! isset($installers[$os])) {
-            abort(404, 'Installer not found for this OS');
-        }
-
-        $filename = $installers[$os];
-        $path = public_path("vendor/qz-tray/installers/{$filename}");
-
-        if (! file_exists($path)) {
-            abort(404, 'Installer file not found');
-        }
-
-        return response()->file($path, [
-            'Content-Type' => 'application/octet-stream',
-            'Content-Disposition' => "attachment; filename=\"{$filename}\"",
-        ]);
-    }
-
-    /**
-     * Get printer for specific path
-     */
-    private function getPrinterForPath(string $path): ?string
-    {
-        $cacheKey = "qz.printer.{$path}";
-
-        // Check session first
-        if ($printer = session()->get($cacheKey)) {
-            return $printer;
-        }
-
-        // Check cache
-        if ($printer = Cache::get($cacheKey)) {
-            return $printer;
-        }
-
-        // Check for wildcard match
-        $paths = Cache::get('qz.printer.paths', []);
-        foreach ($paths as $cachedPath => $cachedPrinter) {
-            if (str_ends_with($cachedPath, '/*')) {
-                $basePath = substr($cachedPath, 0, -2);
-                if (str_starts_with($path, $basePath)) {
-                    return $cachedPrinter;
-                }
-            }
-        }
-
-        // Return default
-        return config('qz-tray.default_printer');
-    }
-
-    /**
-     * Generate SSL certificate
-     */
-    private function generateCertificate()
-    {
-        $certDir = storage_path('qz');
         if (! is_dir($certDir)) {
             mkdir($certDir, 0755, true);
         }
 
+        $certPath = $certDir.'/certificate.txt';
+        $keyPath = $certDir.'/private-key.pem';
+
+        // Check if already exists
+        if (file_exists($certPath) && file_exists($keyPath)) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Certificate already exists',
+            ]);
+        }
+
+        // Generate certificate using OpenSSL command line
+        // This is more reliable than PHP's openssl functions
         $config = [
             'digest_alg' => 'sha512',
             'private_key_bits' => 2048,
             'private_key_type' => OPENSSL_KEYTYPE_RSA,
         ];
 
-        // Generate key pair
-        $keypair = openssl_pkey_new($config);
-        openssl_pkey_export($keypair, $privateKey);
+        // Generate private key
+        $privateKey = openssl_pkey_new($config);
+        openssl_pkey_export($privateKey, $privateKeyPEM);
 
-        // Create CSR
+        // Generate certificate signing request
         $csr = openssl_csr_new([
-            'commonName' => config('app.name', 'Laravel QZ Tray'),
+            'commonName' => config('app.name', 'Laravel App').' QZ Tray',
             'countryName' => 'US',
-            'organizationName' => 'Laravel QZ Tray',
-        ], $keypair);
+            'organizationName' => config('app.name', 'Laravel App'),
+        ], $privateKey, $config);
 
-        // Sign certificate (self-signed)
-        $cert = openssl_csr_sign($csr, null, $keypair, 365, $config, time());
-
-        // Export certificate
-        openssl_x509_export($cert, $certificate);
+        // Generate self-signed certificate
+        $certificate = openssl_csr_sign($csr, null, $privateKey, 365, $config, time());
+        openssl_x509_export($certificate, $certificatePEM);
 
         // Save files
-        file_put_contents($certDir.'/certificate.pem', $certificate);
-        file_put_contents($certDir.'/private-key.pem', $privateKey);
+        file_put_contents($certPath, $certificatePEM);
+        file_put_contents($keyPath, $privateKeyPEM);
+
+        // Set permissions
+        chmod($certPath, 0644);
+        chmod($keyPath, 0600);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Certificate generated successfully',
+            'certificate_path' => $certPath,
+            'key_path' => $keyPath,
+        ]);
     }
 
     /**
-     * Test PDF generation
+     * Test endpoint - verify signature works
      */
-    public function testPdf()
+    public function testSign(Request $request): \Illuminate\Http\JsonResponse
     {
-        // Generate a simple PDF for testing
-        $pdf = \PDF::loadView('test.pdf', [
-            'title' => 'QZ Tray Test',
-            'content' => 'This is a test PDF for QZ Tray printing.',
-            'timestamp' => now()->toDateTimeString(),
-        ]);
+        $testData = 'test_signature_data_'.time();
 
-        return $pdf->stream('test.pdf');
+        $keyPath = config('qz-tray.key_path', storage_path('app/qz/private-key.pem'));
+
+        if (! is_readable($keyPath)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Private key not found',
+            ], 500);
+        }
+
+        $privateKeyContent = file_get_contents($keyPath);
+        $privateKey = openssl_pkey_get_private($privateKeyContent);
+
+        if ($privateKey === false) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid private key',
+            ], 500);
+        }
+
+        $signature = '';
+        $success = openssl_sign(
+            $testData,
+            $signature,
+            $privateKey,
+            OPENSSL_ALGO_SHA512
+        );
+
+        openssl_free_key($privateKey);
+
+        if (! $success) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Signing test failed',
+            ], 500);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Signature test successful',
+            'algorithm' => 'SHA512',
+            'test_data' => $testData,
+            'signature_length' => strlen(base64_encode($signature)),
+        ]);
+    }
+
+    /**
+     * Installer setup
+     */
+    public function setup(): \Illuminate\Http\JsonResponse
+    {
+        $certPath = config('qz-tray.cert_path', storage_path('app/qz/certificate.txt'));
+        $keyPath = config('qz-tray.key_path', storage_path('app/qz/private-key.pem'));
+
+        $certExists = is_readable($certPath);
+        $keyExists = is_readable($keyPath);
+
+        if (! $certExists || ! $keyExists) {
+            $result = $this->generateCertificate();
+            if ($result instanceof \Illuminate\Http\JsonResponse) {
+                return $result;
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'QZ Tray setup complete',
+            'certificate' => $certExists ? 'exists' : 'generated',
+            'private_key' => $keyExists ? 'exists' : 'generated',
+            'endpoints' => [
+                'certificate' => url('/qz/certificate'),
+                'sign' => url('/qz/sign'),
+                'status' => url('/qz/status'),
+            ],
+        ]);
     }
 }
