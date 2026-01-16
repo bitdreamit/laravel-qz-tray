@@ -9,7 +9,8 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('qz_print_jobs', function (Blueprint $table) {
-            $table->string('id')->primary();
+            $table->id();
+            $table->unsignedBigInteger('tenant_id')->nullable();
             $table->foreignId('user_id')->nullable()->constrained()->onDelete('cascade');
             $table->string('printer_name');
             $table->string('document_url');

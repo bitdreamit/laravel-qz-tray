@@ -5,21 +5,6 @@ use Bitdreamit\QzTray\Http\Controllers\QzSecurityController;
 
 $config = config('qz-tray.routes');
 
-// routes/web.php
-//Route::prefix('qz')->group(function () {
-//    // Security endpoints (required by QZ Tray)
-//    Route::get('/certificate', [QzController::class, 'certificate']);
-//    Route::post('/sign', [QzController::class, 'sign']);
-//
-//    // Printer management
-//    Route::get('/printers', [QzController::class, 'printers']);
-//    Route::get('/printer/{path}', [QzController::class, 'getPrinter'])->where('path', '.*');
-//    Route::post('/printer', [QzController::class, 'setPrinter']);
-//
-//    // Test routes
-//    Route::get('/test/pdf', [QzController::class, 'testPdf']);
-//});
-
 Route::group([
     'prefix' => $config['prefix'] ?? 'qz',
     'middleware' => $config['middleware'] ?? ['web'],
@@ -64,4 +49,6 @@ Route::group([
     Route::get('/installer/{os}', [QzSecurityController::class, 'installer'])
         ->where('os', 'windows|linux|macos')
         ->name('qz.installer');
+
+    Route::get('/test/pdf', [QzSecurityController::class, 'testPdf']);
 });
