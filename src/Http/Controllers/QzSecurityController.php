@@ -11,44 +11,68 @@ use Illuminate\Support\Facades\Log;
 class QzSecurityController extends Controller
 {
     /**
-     * Get QZ Tray certificate
+     * Serve public certificate
      */
     public function certificate(): Response
     {
         $certPath = config('qz-tray.cert_path');
 
-        if (! file_exists($certPath)) {
+        if (! is_readable($certPath)) {
             return response('Certificate not found', 404);
         }
 
-        $cert = file_get_contents($certPath);
-
-        return response($cert, 200, [
-            'Content-Type' => 'application/x-x509-ca-cert',
-            'Content-Disposition' => 'inline; filename="qz-tray-cert.pem"',
-            'Cache-Control' => 'public, max-age='.config('qz-tray.cert_ttl', 3600),
-        ]);
+        return response(
+            file_get_contents($certPath),
+            200,
+            [
+                'Content-Type' => 'application/x-x509-ca-cert',
+                'Content-Disposition' => 'inline; filename="qz-tray-cert.pem"',
+                'Cache-Control' => 'public, max-age='.config('qz-tray.cert_ttl', 3600),
+            ]
+        );
     }
 
     /**
      * Sign data for QZ Tray
+     *
+     * IMPORTANT:
+     * - Must return RAW base64 string
+     * - No JSON
+     * - No debug output
      */
     public function sign(Request $request): Response
     {
         $request->validate([
-            'data' => 'required|string',
+            'data' => ['required', 'string'],
         ]);
 
-        $data = $request->input('data');
         $keyPath = config('qz-tray.key_path');
 
-        if (! file_exists($keyPath)) {
+        if (! is_readable($keyPath)) {
             return response('Private key not found', 500);
         }
 
-        $privateKey = file_get_contents($keyPath);
+        $privateKeyContent = file_get_contents($keyPath);
 
-        openssl_sign($data, $signature, $privateKey, OPENSSL_ALGO_SHA512);
+        $privateKey = openssl_pkey_get_private($privateKeyContent);
+
+        if ($privateKey === false) {
+            return response('Invalid private key', 500);
+        }
+
+        $data = $request->input('data');
+
+        $signature = '';
+        $success = openssl_sign(
+            $data,
+            $signature,
+            $privateKey,
+            OPENSSL_ALGO_SHA256
+        );
+
+        if (! $success) {
+            return response('Signing failed', 500);
+        }
 
         return response(base64_encode($signature), 200, [
             'Content-Type' => 'text/plain',
@@ -370,6 +394,4 @@ class QzSecurityController extends Controller
 
         return $pdf->stream('test.pdf');
     }
-
-
 }
