@@ -124,32 +124,25 @@
             });
         });
 
-        qz.security.setSignaturePromise(function(data) {
-            return new Promise((resolve, reject) => {
-                log('Requesting signature');
+        qz.security.setSignaturePromise(function (data) {
+            log('Requesting signature');
 
-                fetch(`${CONFIG.ENDPOINT}/sign`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
-                    body: JSON.stringify({ data: data })
-                })
-                    .then(response => {
-                        if (!response.ok) {
-                            throw new Error(`HTTP ${response.status}`);
-                        }
-                        return response.text();
-                    })
-                    .then(signature => {
-                        resolve(signature);
-                    })
-                    .catch(error => {
-                        console.error('Failed to get signature:', error);
-                        reject(error);
-                    });
-            });
+            return fetch(CONFIG.ENDPOINT + '/sign', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-TOKEN':
+                        document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+                },
+                body: JSON.stringify({ data: data })
+            })
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error('HTTP ' + response.status);
+                    }
+                    return response.text();
+                });
         });
 
         log('Security setup complete');
