@@ -6,9 +6,39 @@ return [
     | Certificate Settings
     |--------------------------------------------------------------------------
     */
-    'cert_path' => storage_path('qz/certificate.pem'),
-    'key_path' => storage_path('qz/private-key.pem'),
+    'cert_path' => storage_path('qz/digital-certificate.txt'),  // QZ Tray expects this exact name
+    'key_path' => storage_path('qz/private-key.pem'),           // QZ Tray expects this exact name
     'cert_ttl' => 3600, // 1 hour cache
+
+    /*
+    |--------------------------------------------------------------------------
+    | Certificate Generation Settings
+    |--------------------------------------------------------------------------
+    */
+    'certificate' => [
+        'generate_demo_style' => true,
+        'validity_days' => 7300, // 20 years like demo
+        'algorithm' => 'sha256',
+        'key_bits' => 2048,
+        'key_type' => OPENSSL_KEYTYPE_RSA,
+
+        // QZ Tray Demo Certificate Details
+        'subject' => [
+            'countryName' => 'US',
+            'stateOrProvinceName' => 'NY',
+            'localityName' => 'Canastota',
+            'organizationName' => 'QZ Industries, LLC',
+            'organizationalUnitName' => 'QZ Industries, LLC',
+            'commonName' => 'QZ Tray Demo Cert',
+            'emailAddress' => 'support@qz.io',
+        ],
+
+        // File names for QZ Tray compatibility (already set above)
+        'files' => [
+            'certificate' => 'digital-certificate.txt',  // QZ Tray expects this
+            'private_key' => 'private-key.pem',          // QZ Tray expects this
+        ],
+    ],
 
     /*
     |--------------------------------------------------------------------------
@@ -26,7 +56,7 @@ return [
     |--------------------------------------------------------------------------
     */
     'websocket' => [
-        'host' => env('QZ_WEBSOCKET_HOST', 'localhost.qz.io'),
+        'host' => env('QZ_WEBSOCKET_HOST', 'localhost'),
         'port' => env('QZ_WEBSOCKET_PORT', 8182),
         'retries' => 1,
         'timeout' => 10,

@@ -3,112 +3,161 @@
 namespace Bitdreamit\QzTray\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Log;
 
 class GenerateCertificate extends Command
 {
-    protected $signature = 'qz-tray:generate-certificate {--force : Force regeneration of certificate}';
+    protected $signature = 'qz:generate-certificate
+                            {--force : Force generation even if certificate exists}
+                            {--show : Show certificate details after generation}';
 
-    protected $description = 'Generate SSL certificate for QZ Tray';
+    protected $description = 'Generate SSL certificate for QZ Tray in demo format';
 
-    public function handle(): int
+    public function handle()
     {
-        if (! extension_loaded('openssl')) {
-            $this->error('OpenSSL PHP extension is not enabled.');
-
-            return self::FAILURE;
+        if (!extension_loaded('openssl')) {
+            $this->error('❌ OpenSSL extension is not enabled. Please enable it in your PHP configuration.');
+            return 1;
         }
 
-        $certPath = config('qz-tray.cert_path', storage_path('qz/certificate.pem'));
+        // Get paths from config
+        $certPath = config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt'));
         $keyPath = config('qz-tray.key_path', storage_path('qz/private-key.pem'));
 
-        if (file_exists($certPath) && file_exists($keyPath) && ! $this->option('force')) {
-            if (! $this->confirm('Certificate already exists. Regenerate?', false)) {
-                $this->info('Certificate generation cancelled.');
+        // Check if already exists
+        if (file_exists($certPath) && file_exists($keyPath) && !$this->option('force')) {
+            $this->info('✅ Certificate already exists.');
+            $this->line('Certificate path: ' . $certPath);
+            $this->line('Private key path: ' . $keyPath);
 
-                return self::SUCCESS;
+            if ($this->option('show')) {
+                $this->showCertificateDetails($certPath);
             }
+
+            return 0;
         }
 
-        $this->info('Generating SSL certificate for QZ Tray...');
+        $this->info('🔐 Generating QZ Tray certificate in demo format...');
 
-        @mkdir(dirname($certPath), 0755, true);
+        // Get certificate config
+        $certConfig = config('qz-tray.certificate', []);
 
-        $opensslConfig = [
-            'digest_alg' => 'sha256',
-            'private_key_bits' => 2048,
-            'private_key_type' => OPENSSL_KEYTYPE_RSA,
+        // Configuration
+        $config = [
+            'digest_alg' => $certConfig['algorithm'] ?? 'sha256',
+            'private_key_bits' => $certConfig['key_bits'] ?? 2048,
+            'private_key_type' => $certConfig['key_type'] ?? OPENSSL_KEYTYPE_RSA,
         ];
 
         // Generate private key
-        $keypair = openssl_pkey_new($opensslConfig);
-
-        if ($keypair === false) {
-            $this->error('Failed to generate OpenSSL private key.');
-            $this->line(openssl_error_string());
-
-            return self::FAILURE;
+        $this->line('Generating private key...');
+        $privateKey = openssl_pkey_new($config);
+        if (!$privateKey) {
+            $this->error('❌ Failed to generate private key: ' . openssl_error_string());
+            return 1;
         }
 
         // Export private key
-        if (! openssl_pkey_export($keypair, $privateKey)) {
-            $this->error('Failed to export private key.');
-            $this->line(openssl_error_string());
+        openssl_pkey_export($privateKey, $privateKeyPEM);
 
-            return self::FAILURE;
-        }
-
-        // Certificate identity
-        $dn = [
-            'countryName' => $this->ask('Country', 'US'),
-            'organizationName' => $this->ask('Organization', 'Laravel QZ Tray'),
-            'commonName' => $this->ask('Common Name (domain)', 'qz-tray.local'),
+        // Get subject from config
+        $subject = $certConfig['subject'] ?? [
+            'countryName' => 'US',
+            'stateOrProvinceName' => 'NY',
+            'localityName' => 'Canastota',
+            'organizationName' => 'QZ Industries, LLC',
+            'organizationalUnitName' => 'QZ Industries, LLC',
+            'commonName' => 'QZ Tray Demo Cert',
+            'emailAddress' => 'support@qz.io',
         ];
 
+        $this->line('Creating certificate...');
+
         // Create CSR
-        $csr = openssl_csr_new($dn, $keypair, $opensslConfig);
+        $csr = openssl_csr_new($subject, $privateKey, $config);
+        $validityDays = $certConfig['validity_days'] ?? 7300;
+        $cert = openssl_csr_sign($csr, null, $privateKey, $validityDays, $config, time());
 
-        if ($csr === false) {
-            $this->error('Failed to create certificate signing request.');
+        // Export certificate
+        openssl_x509_export($cert, $certificatePEM);
 
-            return self::FAILURE;
+        // Create directory if needed
+        $certDir = dirname($certPath);
+        if (!is_dir($certDir)) {
+            mkdir($certDir, 0755, true);
+            $this->line('Created directory: ' . $certDir);
         }
-
-        // Self-signed certificate (10 years)
-        $cert = openssl_csr_sign($csr, null, $keypair, 3650);
-
-        if ($cert === false) {
-            $this->error('Failed to sign certificate.');
-
-            return self::FAILURE;
-        }
-
-        openssl_x509_export($cert, $certificate);
 
         // Save files
-        file_put_contents($certPath, $certificate);
-        file_put_contents($keyPath, $privateKey);
+        file_put_contents($certPath, $certificatePEM);
+        file_put_contents($keyPath, $privateKeyPEM);
 
-        // ✅ PHP 8.0 + 8.1+ safe cleanup
-        if (is_resource($keypair)) {
-            openssl_pkey_free($keypair);
+        // Set permissions
+        chmod($certPath, 0644);
+        chmod($keyPath, 0600);
+
+        $this->info('✅ Certificate generated successfully!');
+        $this->line('📄 Certificate path: ' . $certPath);
+        $this->line('🔑 Private key path: ' . $keyPath);
+        $this->line('⏳ Validity: ' . $validityDays . ' days');
+
+        if ($this->option('show')) {
+            $this->showCertificateDetails($certPath);
         }
 
-        if (is_resource($cert)) {
+        // Test the certificate
+        $this->testCertificate();
+
+        openssl_free_key($privateKey);
+
+        return 0;
+    }
+
+    protected function showCertificateDetails($certPath)
+    {
+        $certData = openssl_x509_parse(file_get_contents($certPath));
+
+        $this->newLine();
+        $this->info('📋 Certificate Details:');
+        $this->line('Subject: ' . $certData['name']);
+        $this->line('Valid From: ' . date('Y-m-d H:i:s', $certData['validFrom_time_t']));
+        $this->line('Valid Until: ' . date('Y-m-d H:i:s', $certData['validTo_time_t']));
+        $this->line('Serial Number: ' . $certData['serialNumber']);
+        $this->line('Signature Algorithm: ' . $certData['signatureTypeSN']);
+    }
+
+    protected function testCertificate()
+    {
+        $this->newLine();
+        $this->info('🧪 Testing certificate...');
+
+        $certPath = config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt'));
+        $keyPath = config('qz-tray.key_path', storage_path('qz/private-key.pem'));
+
+        if (!file_exists($certPath) || !file_exists($keyPath)) {
+            $this->error('Certificate or key file not found');
+            return;
+        }
+
+        // Test certificate validity
+        $cert = openssl_x509_read(file_get_contents($certPath));
+        $key = openssl_pkey_get_private(file_get_contents($keyPath));
+
+        if ($cert && $key) {
+            $this->line('✅ Certificate format is valid');
+            $this->line('✅ Private key format is valid');
+
+            // Test signature
+            $testData = 'test_qz_tray_' . time();
+            $signature = '';
+            if (openssl_sign($testData, $signature, $key, OPENSSL_ALGO_SHA512)) {
+                $this->line('✅ Signing with SHA512 works');
+            }
+
+            openssl_free_key($key);
             openssl_x509_free($cert);
+        } else {
+            $this->error('❌ Certificate or key is invalid');
         }
-
-        $fingerprint = openssl_x509_fingerprint($certificate, 'sha256');
-
-        $this->info('Certificate generated successfully.');
-        $this->line('');
-        $this->line('Certificate Path   : '.$certPath);
-        $this->line('Private Key Path   : '.$keyPath);
-        $this->line('SHA-256 Fingerprint: '.$fingerprint);
-        $this->line('Validity           : 10 years');
-        $this->line('Key Size           : 2048 bits');
-        $this->line('');
-        $this->line('Restart your web server if required.');
-
-        return self::SUCCESS;
     }
 }

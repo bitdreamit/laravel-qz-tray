@@ -1,9 +1,9 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
 use Bitdreamit\QzTray\Http\Controllers\QzSecurityController;
+use Illuminate\Support\Facades\Route;
 
-$config = config('qz-tray.routes');
+$config = config('qz-tray.routes', ['prefix' => 'qz', 'middleware' => ['web']]);
 
 Route::group([
     'prefix' => $config['prefix'] ?? 'qz',
@@ -45,10 +45,33 @@ Route::group([
     Route::get('/health', [QzSecurityController::class, 'health'])
         ->name('qz.health');
 
+    // Certificate management
+    Route::post('/generate', [QzSecurityController::class, 'generateCertificatePublic'])
+        ->name('qz.generate');
+
+    Route::post('/setup', [QzSecurityController::class, 'setup'])
+        ->name('qz.setup');
+
+    Route::post('/test-sign', [QzSecurityController::class, 'testSign'])
+        ->name('qz.test-sign');
+
+    // Cache management
+    Route::post('/clear-cache', [QzSecurityController::class, 'clearCache'])
+        ->name('qz.clear-cache');
+
     // Installer downloads
     Route::get('/installer/{os}', [QzSecurityController::class, 'installer'])
         ->where('os', 'windows|linux|macos')
         ->name('qz.installer');
 
-    Route::get('/test/pdf', [QzSecurityController::class, 'testPdf']);
+    // Test endpoints
+    Route::get('/test/pdf', [QzSecurityController::class, 'testPdf'])
+        ->name('qz.test.pdf');
+
+    Route::get('/test/connection', [QzSecurityController::class, 'testConnection'])
+        ->name('qz.test.connection');
+
+    Route::get('/qz-test', function() {
+        return view('test');
+    });
 });

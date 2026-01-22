@@ -16,6 +16,7 @@ laravel-qz-tray/
 ├── resources/
 │   ├── js/
 │   │   ├── smart-print.js
+│   │   ├── qz-tray.js
 │   │   ├── smart-print.min.js
 │   │   ├── printer-switcher.js
 │   │   ├── printer-status.js
