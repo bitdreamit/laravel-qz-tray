@@ -3,7 +3,6 @@
 namespace Bitdreamit\QzTray\Console\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Log;
 
 class GenerateCertificate extends Command
 {
@@ -15,8 +14,9 @@ class GenerateCertificate extends Command
 
     public function handle()
     {
-        if (!extension_loaded('openssl')) {
+        if (! extension_loaded('openssl')) {
             $this->error('❌ OpenSSL extension is not enabled. Please enable it in your PHP configuration.');
+
             return 1;
         }
 
@@ -25,10 +25,10 @@ class GenerateCertificate extends Command
         $keyPath = config('qz-tray.key_path', storage_path('qz/private-key.pem'));
 
         // Check if already exists
-        if (file_exists($certPath) && file_exists($keyPath) && !$this->option('force')) {
+        if (file_exists($certPath) && file_exists($keyPath) && ! $this->option('force')) {
             $this->info('✅ Certificate already exists.');
-            $this->line('Certificate path: ' . $certPath);
-            $this->line('Private key path: ' . $keyPath);
+            $this->line('Certificate path: '.$certPath);
+            $this->line('Private key path: '.$keyPath);
 
             if ($this->option('show')) {
                 $this->showCertificateDetails($certPath);
@@ -52,8 +52,9 @@ class GenerateCertificate extends Command
         // Generate private key
         $this->line('Generating private key...');
         $privateKey = openssl_pkey_new($config);
-        if (!$privateKey) {
-            $this->error('❌ Failed to generate private key: ' . openssl_error_string());
+        if (! $privateKey) {
+            $this->error('❌ Failed to generate private key: '.openssl_error_string());
+
             return 1;
         }
 
@@ -83,9 +84,9 @@ class GenerateCertificate extends Command
 
         // Create directory if needed
         $certDir = dirname($certPath);
-        if (!is_dir($certDir)) {
+        if (! is_dir($certDir)) {
             mkdir($certDir, 0755, true);
-            $this->line('Created directory: ' . $certDir);
+            $this->line('Created directory: '.$certDir);
         }
 
         // Save files
@@ -97,9 +98,9 @@ class GenerateCertificate extends Command
         chmod($keyPath, 0600);
 
         $this->info('✅ Certificate generated successfully!');
-        $this->line('📄 Certificate path: ' . $certPath);
-        $this->line('🔑 Private key path: ' . $keyPath);
-        $this->line('⏳ Validity: ' . $validityDays . ' days');
+        $this->line('📄 Certificate path: '.$certPath);
+        $this->line('🔑 Private key path: '.$keyPath);
+        $this->line('⏳ Validity: '.$validityDays.' days');
 
         if ($this->option('show')) {
             $this->showCertificateDetails($certPath);
@@ -119,11 +120,11 @@ class GenerateCertificate extends Command
 
         $this->newLine();
         $this->info('📋 Certificate Details:');
-        $this->line('Subject: ' . $certData['name']);
-        $this->line('Valid From: ' . date('Y-m-d H:i:s', $certData['validFrom_time_t']));
-        $this->line('Valid Until: ' . date('Y-m-d H:i:s', $certData['validTo_time_t']));
-        $this->line('Serial Number: ' . $certData['serialNumber']);
-        $this->line('Signature Algorithm: ' . $certData['signatureTypeSN']);
+        $this->line('Subject: '.$certData['name']);
+        $this->line('Valid From: '.date('Y-m-d H:i:s', $certData['validFrom_time_t']));
+        $this->line('Valid Until: '.date('Y-m-d H:i:s', $certData['validTo_time_t']));
+        $this->line('Serial Number: '.$certData['serialNumber']);
+        $this->line('Signature Algorithm: '.$certData['signatureTypeSN']);
     }
 
     protected function testCertificate()
@@ -134,8 +135,9 @@ class GenerateCertificate extends Command
         $certPath = config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt'));
         $keyPath = config('qz-tray.key_path', storage_path('qz/private-key.pem'));
 
-        if (!file_exists($certPath) || !file_exists($keyPath)) {
+        if (! file_exists($certPath) || ! file_exists($keyPath)) {
             $this->error('Certificate or key file not found');
+
             return;
         }
 
@@ -148,7 +150,7 @@ class GenerateCertificate extends Command
             $this->line('✅ Private key format is valid');
 
             // Test signature
-            $testData = 'test_qz_tray_' . time();
+            $testData = 'test_qz_tray_'.time();
             $signature = '';
             if (openssl_sign($testData, $signature, $key, OPENSSL_ALGO_SHA512)) {
                 $this->line('✅ Signing with SHA512 works');

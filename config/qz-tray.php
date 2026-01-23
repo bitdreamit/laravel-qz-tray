@@ -24,13 +24,13 @@ return [
 
         // QZ Tray Demo Certificate Details
         'subject' => [
-            'countryName' => 'US',
-            'stateOrProvinceName' => 'NY',
-            'localityName' => 'Canastota',
-            'organizationName' => 'QZ Industries, LLC',
-            'organizationalUnitName' => 'QZ Industries, LLC',
-            'commonName' => 'QZ Tray Demo Cert',
-            'emailAddress' => 'support@qz.io',
+            'countryName' => 'BD',
+            'stateOrProvinceName' => 'Rangpur',
+            'localityName' => 'Rangpur',
+            'organizationName' => 'Bit Dream IT',
+            'organizationalUnitName' => 'Bit Dream IT',
+            'commonName' => 'Laravel QZ Tray',
+            'emailAddress' => 'info@bitdreamit.com',
         ],
 
         // File names for QZ Tray compatibility (already set above)

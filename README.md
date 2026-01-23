@@ -75,7 +75,7 @@ composer require bitdreamit/laravel-qz-tray
 # - Generates SSL certificate
 # - Publishes JavaScript files
 # - Sets up routes
-php artisan qz-tray:install
+php artisan qz:install
 ```
 
 **What the installer does:**
@@ -713,7 +713,7 @@ testPrinter(printer);
 3. **Check certificate**
    ```bash
    # Regenerate certificate
-   php artisan qz-tray:generate-certificate --force
+   php artisan qz:generate-certificate --force
    ```
 
 4. **Check firewall/antivirus**
@@ -996,7 +996,7 @@ async function processQueue() {
 ### **1. Certificate Security**
 - Certificates auto-generated with 4096-bit RSA
 - Stored in `storage/qz/` directory
-- Regenerate periodically with `php artisan qz-tray:generate-certificate`
+- Regenerate periodically with `php artisan qz:generate-certificate`
 
 ### **2. Rate Limiting**
 - Routes are rate-limited (60 requests/minute)
@@ -1141,7 +1141,7 @@ Visit GitHub repository issues section
 
 ### **1-Line Installation**
 ```bash
-composer require bitdreamit/laravel-qz-tray && php artisan qz-tray:install
+composer require bitdreamit/laravel-qz-tray && php artisan qz:install
 ```
 
 ### **Minimal Setup**

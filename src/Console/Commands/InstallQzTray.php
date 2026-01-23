@@ -3,6 +3,7 @@
 namespace Bitdreamit\QzTray\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\File;
 
 class InstallQzTray extends Command
 {
@@ -12,34 +13,17 @@ class InstallQzTray extends Command
 
     protected $description = 'Install QZ Tray package';
 
-    public function handle()
+    public function handle(): int
     {
         $this->info('🚀 Installing Laravel QZ Tray Package...');
         $this->newLine();
 
-        // Publish config
-        $this->info('📁 Publishing configuration...');
-        $this->call('vendor:publish', [
-            '--tag' => 'qz-config',
-            '--force' => $this->option('force'),
-        ]);
+        $this->publishStep('📁 Publishing configuration...', 'qz-config');
+        $this->publishStep('🗃️ Publishing migrations...', 'qz-migrations');
+        $this->publishStep('🗃️ Publishing blade views...', 'qz-blade');
+        $this->publishStep('📦 Publishing JavaScript assets...', 'qz-assets');
 
-        // Publish migrations
-        $this->info('🗃️ Publishing migrations...');
-        $this->call('vendor:publish', [
-            '--tag' => 'qz-migrations',
-            '--force' => $this->option('force'),
-        ]);
-
-        // Publish assets
-        $this->info('📦 Publishing JavaScript assets...');
-        $this->call('vendor:publish', [
-            '--tag' => 'qz-assets',
-            '--force' => $this->option('force'),
-        ]);
-
-        // Generate certificate
-        if (!$this->option('no-cert')) {
+        if (! $this->option('no-cert') && $this->getApplication()->has('qz:generate-certificate')) {
             $this->info('🔐 Generating certificate...');
             $this->call('qz:generate-certificate', [
                 '--force' => $this->option('force'),
@@ -47,39 +31,28 @@ class InstallQzTray extends Command
             ]);
         }
 
-        // Create necessary directories
-        $directories = [
-            storage_path('qz'),
-            public_path('vendor/qz-tray'),
-            public_path('vendor/qz-tray/installers'),
-        ];
-
-        foreach ($directories as $directory) {
-            if (!is_dir($directory)) {
-                mkdir($directory, 0755, true);
-                $this->line('Created directory: ' . $directory);
-            }
-        }
+        File::ensureDirectoryExists(storage_path('qz'), 0755);
 
         $this->newLine();
         $this->info('✅ QZ Tray installed successfully!');
         $this->newLine();
 
         $this->info('📋 Next Steps:');
-        $this->line('1. Download and install QZ Tray from https://qz.io/download');
+        $this->line('1. Download QZ Tray: https://qz.io/download');
         $this->line('2. Run migrations: php artisan migrate');
-        $this->line('3. Visit your application at /qz/status to verify setup');
-        $this->line('4. Configure printers in QZ Tray desktop application');
+        $this->line('3. Visit: /qz/status');
         $this->newLine();
 
-        $this->info('🔗 Available Endpoints:');
-        $this->line('• /qz/certificate - Get certificate');
-        $this->line('• /qz/sign - Sign data');
-        $this->line('• /qz/status - Check status');
-        $this->line('• /qz/health - Health check');
-        $this->line('• /qz/printers - List printers');
-        $this->newLine();
+        return self::SUCCESS;
+    }
 
-        return 0;
+    protected function publishStep(string $message, string $tag): void
+    {
+        $this->info($message);
+
+        $this->callSilent('vendor:publish', [
+            '--tag' => $tag,
+            '--force' => $this->option('force'),
+        ]);
     }
 }

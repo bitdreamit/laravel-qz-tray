@@ -7,10 +7,11 @@
     <title>QZ Tray Test - Laravel v2.2.6 Compatible</title>
 
     <!-- Bootstrap 4.6 CSS -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+    {{--    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">--}}
+    <link rel="stylesheet" href="{{ asset(mix('css/core.css')) }}"/>
     <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-
+    {{--    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">--}}
+    <link rel="stylesheet" href="{{ asset(mix('fonts/font-awesome/css/font-awesome.min.css')) }}">
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -670,8 +671,9 @@ Status: Testing QZ Tray v2.2.6 Compatibility
 </div>
 
 <!-- Bootstrap 4.6 JS -->
-<script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+{{--<script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script>--}}
+<script src="{{ asset(mix('vendors/js/vendors.min.js')) }}"></script>
+{{--<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>--}}
 
 <!-- QZ Tray JS (v2.2.6) -->
 <script src="{{ asset('vendor/qz-tray/qz-tray.js') }}"></script>
@@ -794,6 +796,7 @@ Status: Testing QZ Tray v2.2.6 Compatibility
                     });
             });
 
+            // FIXED: QZ Tray v2.2.6 expects the signature promise to return the signature directly
             qz.security.setSignaturePromise(function(toSign) {
                 log('Requesting signature...');
 
@@ -806,6 +809,7 @@ Status: Testing QZ Tray v2.2.6 Compatibility
                     headers['X-CSRF-TOKEN'] = csrfToken.getAttribute('content');
                 }
 
+                // Return the fetch promise directly
                 return fetch(`${CONFIG.ENDPOINT}/sign`, {
                     method: 'POST',
                     headers: headers,
@@ -813,17 +817,12 @@ Status: Testing QZ Tray v2.2.6 Compatibility
                         data: toSign,
                         timestamp: Date.now()
                     })
-                })
-                    .then(function(response) {
-                        if (!response.ok) {
-                            throw new Error('Signature failed: ' + response.status);
-                        }
-                        return response.text();
-                    })
-                    .catch(function(error) {
-                        console.error('Signature error:', error);
-                        throw error;
-                    });
+                }).then(function(response) {
+                    if (!response.ok) {
+                        throw new Error('Signature failed: ' + response.status);
+                    }
+                    return response.text();
+                });
             });
 
             state.qzInitialized = true;
