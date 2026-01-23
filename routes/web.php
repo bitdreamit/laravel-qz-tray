@@ -71,8 +71,6 @@ Route::group([
     Route::get('/test/connection', [QzSecurityController::class, 'testConnection'])
         ->name('qz.test.connection');
 
-    Route::get('/qz-test', function () {
-        return view('qz-tray::test');
-    });
+    Route::get('/test', [QzSecurityController::class, 'index'])->name('qz.test');
 
 });

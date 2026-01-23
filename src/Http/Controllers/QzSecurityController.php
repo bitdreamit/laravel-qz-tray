@@ -11,6 +11,14 @@ use Illuminate\Support\Facades\Log;
 class QzSecurityController extends Controller
 {
     /**
+     * Show QZ Tray test page
+     */
+    public function index()
+    {
+        return view('qz-tray::test');
+    }
+
+    /**
      * Serve the public certificate for QZ Tray.
      * ONLY the certificate (not private key) should be exposed.
      */
