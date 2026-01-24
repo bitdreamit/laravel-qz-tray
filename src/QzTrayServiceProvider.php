@@ -57,7 +57,7 @@ class QzTrayServiceProvider extends ServiceProvider
             __DIR__.'/../resources/fonts' => public_path('vendor/qz-tray/fonts'),
             __DIR__.'/../resources/assets' => public_path('vendor/qz-tray/assets'),
         ], 'qz-assets');
-        
+
         /*
         |--------------------------------------------------------------------------
         | Publish Certificate Storage Directory

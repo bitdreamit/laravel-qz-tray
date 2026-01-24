@@ -15,7 +15,7 @@
 <script type="text/javascript" src="{{asset('vendor/qz-tray/js/sample/padstart-pollyfill.js')}}"></script>
 <script type="text/javascript" src="{{asset('vendor/qz-tray/js/sample/array-from-pollyfill.js')}}"></script>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsrsasign/11.1.0/jsrsasign-all-min.js"></script>
+<script type="text/javascript" src="{{asset('vendor/qz-tray/js/sample/jsrsasign-all-min.js')}}"></script>
 
 <!-- Page styling -->
 <script type="text/javascript" src="{{asset('vendor/qz-tray/js/sample/jquery-1.11.3.min.js')}}"></script>
