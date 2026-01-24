@@ -72,5 +72,6 @@ Route::group([
         ->name('qz.test.connection');
 
     Route::get('/test', [QzSecurityController::class, 'index'])->name('qz.test');
+    Route::get('/smart', [QzSecurityController::class, 'smart'])->name('qz.smart');
 
 });

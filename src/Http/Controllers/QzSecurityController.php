@@ -6,7 +6,6 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
 
 class QzSecurityController extends Controller
 {
@@ -15,73 +14,78 @@ class QzSecurityController extends Controller
      */
     public function index()
     {
-        return view('qz-tray::test');
+        return view('qz-tray::default');
+    }
+
+    public function smart()
+    {
+        return view('qz-tray::smart');
     }
 
     /**
      * Serve the public certificate for QZ Tray.
      * ONLY the certificate (not private key) should be exposed.
      */
-    public function certificate(): Response
+    public function certificate(): \Illuminate\Http\Response
     {
         $certPath = config('qz-tray.cert_path');
 
         if (! file_exists($certPath)) {
-            Log::error('[QZ Tray] Certificate not found at '.$certPath);
-
-            return response('Certificate not found', 404);
+            abort(404, 'Certificate not found');
         }
 
-        $certificate = file_get_contents($certPath);
-
-        return response($certificate, 200, [
-            'Content-Type' => 'text/plain',
-            'Cache-Control' => 'no-store, no-cache, must-revalidate',
-            'Pragma' => 'no-cache',
-        ]);
+        return response(
+            file_get_contents($certPath),
+            200,
+            [
+                'Content-Type' => 'text/plain',
+                'Cache-Control' => 'no-store, no-cache, must-revalidate',
+                'Pragma' => 'no-cache',
+            ]
+        );
     }
 
     /**
      * Sign data for QZ Tray requests.
      */
-    public function sign(Request $request): Response
+    public function sign(Request $request): \Illuminate\Http\Response
     {
         $data = $request->input('data');
 
         if (! $data) {
-            return response('Missing data parameter', 400);
+            abort(400, 'Missing data');
         }
 
         $keyPath = config('qz-tray.key_path');
 
         if (! file_exists($keyPath)) {
-            Log::critical('[QZ Tray] Private key missing');
-
-            return response('Signing unavailable', 500);
+            abort(500, 'Private key missing');
         }
 
-        $privateKey = openssl_pkey_get_private(file_get_contents($keyPath));
+        $privateKey = openssl_pkey_get_private(
+            file_get_contents($keyPath)
+        );
 
         if (! $privateKey) {
-            Log::critical('[QZ Tray] Invalid private key');
-
-            return response('Signing unavailable', 500);
+            abort(500, 'Invalid private key');
         }
 
-        $signature = '';
-        $success = openssl_sign($data, $signature, $privateKey, OPENSSL_ALGO_SHA512);
+        $signature = null;
+
+        openssl_sign(
+            $data,
+            $signature,
+            $privateKey,
+            OPENSSL_ALGO_SHA512
+        );
 
         openssl_free_key($privateKey);
 
-        if (! $success) {
-            Log::error('[QZ Tray] Signing failed');
-
-            return response('Signing failed', 500);
-        }
-
-        return response(base64_encode($signature), 200, [
-            'Content-Type' => 'text/plain',
-        ]);
+        return response(
+            base64_encode($signature),
+            200,
+            ['Content-Type' => 'text/plain']
+        );
     }
 
     /**
