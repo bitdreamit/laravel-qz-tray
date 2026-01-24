@@ -55,4 +55,5 @@ class InstallQzTray extends Command
             '--force' => $this->option('force'),
         ]);
     }
+
 }

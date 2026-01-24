@@ -76,6 +76,10 @@ composer require bitdreamit/laravel-qz-tray
 # - Publishes JavaScript files
 # - Sets up routes
 php artisan qz:install
+php artisan qz:install --force
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-config --force
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-assets --force
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-blade --force
 ```
 
 **What the installer does:**

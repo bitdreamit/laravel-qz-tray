@@ -52,9 +52,12 @@ class QzTrayServiceProvider extends ServiceProvider
         |--------------------------------------------------------------------------
         */
         $this->publishes([
-            __DIR__.'/../resources/js' => public_path('vendor/qz-tray'),
+            __DIR__.'/../resources/js' => public_path('vendor/qz-tray/js'),
+            __DIR__.'/../resources/css' => public_path('vendor/qz-tray/css'),
+            __DIR__.'/../resources/fonts' => public_path('vendor/qz-tray/fonts'),
+            __DIR__.'/../resources/assets' => public_path('vendor/qz-tray/assets'),
         ], 'qz-assets');
-
+        
         /*
         |--------------------------------------------------------------------------
         | Publish Certificate Storage Directory
