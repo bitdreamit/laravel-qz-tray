@@ -52,8 +52,7 @@ Route::group([
     Route::post('/setup', [QzSecurityController::class, 'setup'])
         ->name('qz.setup');
 
-    Route::post('/test-sign', [QzSecurityController::class, 'testSign'])
-        ->name('qz.test-sign');
+    Route::post('/test-sign', [QzSecurityController::class, 'testSign'])->name('qz.test-sign');
 
     // Cache management
     Route::post('/clear-cache', [QzSecurityController::class, 'clearCache'])
@@ -71,7 +70,7 @@ Route::group([
     Route::get('/test/connection', [QzSecurityController::class, 'testConnection'])
         ->name('qz.test.connection');
 
-    Route::get('/{test?}', [QzSecurityController::class, 'index'])->name('qz.test');
+    Route::get('/test', [QzSecurityController::class, 'index'])->name('qz.test');
 
     Route::get('/smart', [QzSecurityController::class, 'smart'])->name('qz.smart');
 

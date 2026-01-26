@@ -1,0 +1,124 @@
+Folder PATH listing for volume SOFTWARE
+Volume serial number is FE06-DD3B
+D:.
+|   .gitattributes
+|   composer.json
+|   folder_structure.txt
+|   LICENSE
+|   README.md
+|   stracture.txt
+|   
++---config
+|       qz-tray.php
+|       
++---database
+|   \---migrations
+|           2026_01_01_000000_create_qz_print_jobs_table.php
+|           
++---resources
+|   |   sample.html
+|   |   
+|   +---assets
+|   |   |   epl_multiples.txt
+|   |   |   epl_sample.txt
+|   |   |   escpos_sample.bin
+|   |   |   fgl_sample.txt
+|   |   |   pdf_sample.pdf
+|   |   |   pgl_sample.txt
+|   |   |   sbpl_sample.txt
+|   |   |   zpl_sample.txt
+|   |   |   zpl_sample.xml
+|   |   |   
+|   |   +---img
+|   |   |       fade-test.png
+|   |   |       image_sample.png
+|   |   |       image_sample_bw.png
+|   |   |       
+|   |   \---signing
+|   |           sign-message.asp
+|   |           sign-message.bouncycastle.cs
+|   |           sign-message.cfm
+|   |           sign-message.cls
+|   |           sign-message.core.cs
+|   |           sign-message.cs
+|   |           sign-message.go
+|   |           sign-message.java
+|   |           sign-message.js
+|   |           sign-message.jsl
+|   |           sign-message.jsp
+|   |           sign-message.node.js
+|   |           sign-message.odoo.py
+|   |           sign-message.php
+|   |           sign-message.pl
+|   |           sign-message.py
+|   |           sign-message.R
+|   |           sign-message.rb
+|   |           sign-message.ts
+|   |           sign-message.vb
+|   |           sign-message.vue.js
+|   |           sign_message.erl
+|   |           
+|   +---css
+|   |       bootstrap.min.css
+|   |       font-awesome.min.css
+|   |       gh-fork-ribbon.min.css
+|   |       smart-print.css
+|   |       style.css
+|   |       
+|   +---fonts
+|   |       fontawesome-webfont.eot
+|   |       fontawesome-webfont.svg
+|   |       fontawesome-webfont.ttf
+|   |       fontawesome-webfont.woff
+|   |       fontawesome-webfont.woff2
+|   |       FontAwesome.otf
+|   |       
+|   +---installers
+|   |       qz-tray-linux.deb
+|   |       qz-tray-macos.pkg
+|   |       qz-tray-windows.exe
+|   |       
+|   +---js
+|   |   |   printer-status.js
+|   |   |   printer-switcher.js
+|   |   |   qz-tray.js
+|   |   |   smart-print-old.js
+|   |   |   smart-print.js
+|   |   |   
+|   |   +---adapters
+|   |   |       escpos.js
+|   |   |       raw-print.js
+|   |   |       zpl.js
+|   |   |       
+|   |   \---sample
+|   |           array-from-pollyfill.js
+|   |           bootstrap.min.js
+|   |           Combined-Campaign-Report-20260125_160746.pdf
+|   |           Combined-Campaign-Report-20260125_160930.pdf
+|   |           jquery-1.11.3.min.js
+|   |           jsrsasign-all-min.js
+|   |           padstart-pollyfill.js
+|   |           promise-polyfill-8.1.3.min.js
+|   |           whatwg-fetch-3.0.0.min.js
+|   |           
+|   \---views
+|           default.blade.php
+|           example.blade.php
+|           
++---routes
+|       api.php
+|       web.php
+|       
+\---src
+    |   QzTrayServiceProvider.php
+    |   
+    +---Console
+    |   \---Commands
+    |           ClearQzCache.php
+    |           GenerateCertificate.php
+    |           InstallQzTray.php
+    |           
+    \---Http
+        \---Controllers
+                QzSecurityController.php
+                
