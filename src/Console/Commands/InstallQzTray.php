@@ -19,28 +19,33 @@ class InstallQzTray extends Command
         $this->newLine();
 
         $this->publishStep('📁 Publishing configuration...', 'qz-config');
-        $this->publishStep('🗃️ Publishing migrations...', 'qz-migrations');
-        $this->publishStep('🗃️ Publishing blade views...', 'qz-blade');
+        $this->publishStep('🗃️  Publishing migrations...', 'qz-migrations');
+        $this->publishStep('📄 Publishing blade views...', 'qz-blade');
         $this->publishStep('📦 Publishing JavaScript assets...', 'qz-assets');
 
-        if (! $this->option('no-cert') && $this->getApplication()->has('qz:generate-certificate')) {
+        // Ensure certificate storage directory exists
+        $certDir = dirname(config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt')));
+        File::ensureDirectoryExists($certDir, 0755);
+
+        if (! $this->option('no-cert')) {
             $this->info('🔐 Generating certificate...');
             $this->call('qz:generate-certificate', [
                 '--force' => $this->option('force'),
-                '--show' => true,
+                '--show'  => true,
             ]);
         }
-
-        File::ensureDirectoryExists(storage_path('qz'), 0755);
 
         $this->newLine();
         $this->info('✅ QZ Tray installed successfully!');
         $this->newLine();
 
         $this->info('📋 Next Steps:');
-        $this->line('1. Download QZ Tray: https://qz.io/download');
-        $this->line('2. Run migrations: php artisan migrate');
-        $this->line('3. Visit: /qz/status');
+        $this->line('  1. Download & install QZ Tray on client machines: https://qz.io/download');
+        $this->line('  2. Run migrations: php artisan migrate');
+        $this->line('  3. Add to your layout:');
+        $this->line('       <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.5/qz-tray.min.js"></script>');
+        $this->line('       <script src="{{ asset(\'vendor/qz-tray/js/smart-print.js\') }}"></script>');
+        $this->line('  4. Visit: /qz/status  to verify your setup');
         $this->newLine();
 
         return self::SUCCESS;
@@ -49,11 +54,9 @@ class InstallQzTray extends Command
     protected function publishStep(string $message, string $tag): void
     {
         $this->info($message);
-
         $this->callSilent('vendor:publish', [
-            '--tag' => $tag,
+            '--tag'   => $tag,
             '--force' => $this->option('force'),
         ]);
     }
-
 }

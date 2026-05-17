@@ -1,40 +1,40 @@
+/**
+ * SmartPrint — Laravel QZ Tray client library
+ * Connects to QZ Tray for silent, dialog-free printing.
+ *
+ * Usage:
+ *   <button data-qz-print="/invoice/1.pdf" data-qz-printer="Receipt Printer">Print</button>
+ *   <div data-qz-auto-print="/receipt/1.pdf" data-qz-delay="1000"></div>
+ *   smartPrint('/doc.pdf', { printer: 'HP', copies: 2 });
+ */
 window.SmartPrint = (() => {
     const STORAGE_PREFIX = 'smart_printer:';
-    const GLOBAL_KEY = 'smart_printer_global';
+    const GLOBAL_KEY     = 'smart_printer_global';
+    let processingQueue  = false; // prevent concurrent processQueue calls
 
     const state = {
-        qzReady: false,
-        connecting: false,
-        printers: [],
+        qzReady:      false,
+        connecting:   false,
+        printers:     [],
         currentPrinter: null,
-        queue: [],
-        failedQueue: [],
-        channel: new BroadcastChannel('smart-print')
+        queue:        [],
+        failedQueue:  [],
+        listeners:    {},
+        channel:      (typeof BroadcastChannel !== 'undefined')
+                        ? new BroadcastChannel('smart-print')
+                        : null,
     };
 
-    const pathKey = () => location.pathname.split('/').slice(0, 2).join('/');
+    // Path key: use full pathname for per-page printer memory
+    const pathKey = () => location.pathname;
 
     // ============================
-    // Device-based default printers
+    // Event emitter
     // ============================
-    const DEVICE_PRINTERS = {
-        'LAB-PC-01': { '/receipts': 'Zebra ZD420', '/invoices': 'Laser Printer' },
-        'LAB-PC-02': { '/receipts': 'Thermal Printer' },
-        '/admin': { '/admin/reports': 'Office Laser Printer' }
-    };
-
-    function getDeviceName() {
-        return window.location.hostname.toUpperCase(); // use hostname as device ID
-    }
-
-    function autoAssignPrinter() {
-        const device = getDeviceName();
-        const route = pathKey();
-        if (DEVICE_PRINTERS[device] && DEVICE_PRINTERS[device][route]) {
-            const printer = DEVICE_PRINTERS[device][route];
-            SmartPrint.setPrinter(printer); // sets and broadcasts
-            console.log(`Auto-assigned printer "${printer}" for ${device} @ ${route}`);
-        }
+    function emit(event, data) {
+        (state.listeners[event] || []).forEach(fn => {
+            try { fn(data); } catch (e) { console.error('[SmartPrint] listener error', e); }
+        });
     }
 
     // ============================
@@ -42,171 +42,488 @@ window.SmartPrint = (() => {
     // ============================
     function setupSecurity() {
         if (!window.qz) return;
+
         qz.security.setCertificatePromise(resolve =>
             fetch('/qz/certificate', { cache: 'no-store' })
-                .then(r => r.text())
+                .then(r => {
+                    if (!r.ok) throw new Error('Certificate fetch failed: ' + r.status);
+                    return r.text();
+                })
                 .then(resolve)
         );
+
         qz.security.setSignatureAlgorithm('SHA512');
+
         qz.security.setSignaturePromise(toSign => (resolve, reject) =>
             fetch('/qz/sign', {
                 method: 'POST',
-                cache: 'no-store',
+                cache:  'no-store',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content
+                    'Content-Type':  'application/json',
+                    'X-CSRF-TOKEN':  document.querySelector('meta[name="csrf-token"]')?.content ?? '',
+                    'Accept':        'text/plain',
                 },
-                body: JSON.stringify({ data: toSign })
+                body: JSON.stringify({ data: toSign }),
             })
-                .then(r => r.ok ? r.text().then(resolve) : r.text().then(reject))
-                .catch(reject)
+            .then(r => r.ok ? r.text().then(resolve) : r.text().then(t => reject(new Error(t))))
+            .catch(reject)
         );
     }
 
     // ============================
-    // Connect QZ
+    // Connect QZ Tray
     // ============================
     async function connectQZ(retries = 2) {
-        if (!window.qz) return false;
+        if (!window.qz) {
+            console.warn('[SmartPrint] QZ Tray library not loaded. Add qz-tray.min.js to your page.');
+            emit('init-failed', { reason: 'qz-library-missing' });
+            return false;
+        }
+
         if (qz.websocket.isActive()) return true;
-        if (state.connecting) return false;
+
+        if (state.connecting) {
+            // Wait for the existing attempt to finish
+            await new Promise(r => setTimeout(r, 200));
+            return qz.websocket.isActive();
+        }
+
         state.connecting = true;
         setupSecurity();
+
         try {
             await qz.websocket.connect();
-            state.qzReady = true;
+            state.qzReady  = true;
             state.printers = await qz.printers.find();
             restorePrinter();
+            emit('connected', { printers: state.printers });
+            emit('printers-loaded', { printers: state.printers });
             return true;
-        } catch {
+        } catch (err) {
             if (retries > 0) {
-                window.location.assign('qz:launch');
-                await new Promise(r => setTimeout(r, 1200));
+                // Attempt to launch QZ Tray if not running
+                try { window.location.assign('qz:launch'); } catch (_) {}
+                await new Promise(r => setTimeout(r, 1500));
                 state.connecting = false;
                 return connectQZ(retries - 1);
             }
             state.qzReady = false;
+            emit('connection-failed', { error: err });
             return false;
-        } finally { state.connecting = false; }
+        } finally {
+            state.connecting = false;
+        }
     }
 
     // ============================
     // Printer Memory
     // ============================
     function restorePrinter() {
-        const saved = localStorage.getItem(STORAGE_PREFIX + pathKey()) || localStorage.getItem(GLOBAL_KEY);
-        if (saved && state.printers.includes(saved)) state.currentPrinter = saved;
+        try {
+            const saved = localStorage.getItem(STORAGE_PREFIX + pathKey())
+                       || localStorage.getItem(GLOBAL_KEY);
+            // Only restore if printer is in the current list (or list is empty = first connect)
+            if (saved && (state.printers.length === 0 || state.printers.includes(saved))) {
+                state.currentPrinter = saved;
+            }
+        } catch (e) {
+            // localStorage may be unavailable (private browsing, etc.)
+        }
     }
 
-    function rememberPrinter(printer, scope = 'path') {
+    function rememberPrinter(printer, scope) {
+        scope = scope || 'path';
         state.currentPrinter = printer;
-        localStorage.setItem(scope === 'global' ? GLOBAL_KEY : STORAGE_PREFIX + pathKey(), printer);
-        state.channel.postMessage({ printer });
+        try {
+            const storageKey = (scope === 'global') ? GLOBAL_KEY : STORAGE_PREFIX + pathKey();
+            localStorage.setItem(storageKey, printer);
+        } catch (e) {}
+
+        if (state.channel) {
+            state.channel.postMessage({ printer });
+        }
+
+        emit('printer-saved', { printer, scope });
     }
 
-    state.channel.onmessage = e => { if (e.data.printer) state.currentPrinter = e.data.printer; };
+    if (state.channel) {
+        state.channel.onmessage = e => {
+            if (e.data && e.data.printer) {
+                state.currentPrinter = e.data.printer;
+            }
+        };
+    }
 
     // ============================
     // Queue Management
     // ============================
-    const pdfProfiles = { default: { width: 210, height: 297, scale: 1.0 }, small: { width: 210, height: 297, scale: 0.8 } };
-
-    function enqueue(job) { state.queue.push(job); updateQueueUI(); processQueue(); }
+    function enqueue(job) {
+        state.queue.push(job);
+        updateQueueUI();
+        emit('job-queued', { job });
+        processQueue();
+    }
 
     async function processQueue() {
-        if (!state.queue.length) return;
-        const job = state.queue.shift();
-        try {
-            if (await connectQZ()) await printQZ(job);
-            else offlineBuffer(job);
-        } catch { offlineBuffer(job); }
+        if (processingQueue || !state.queue.length) return;
+        processingQueue = true;
+
+        while (state.queue.length) {
+            const job = state.queue.shift();
+            emit('job-processing', { job });
+            try {
+                const connected = await connectQZ();
+                if (connected) {
+                    await printQZ(job);
+                } else {
+                    offlineBuffer(job);
+                }
+            } catch (err) {
+                console.error('[SmartPrint] Job error:', err);
+                offlineBuffer(job);
+            }
+        }
+
+        processingQueue = false;
         updateQueueUI();
     }
 
     function offlineBuffer(job) {
         state.failedQueue.push(job);
-        const offline = JSON.parse(localStorage.getItem('sp_offline_queue') || '[]');
-        offline.push(job);
-        localStorage.setItem('sp_offline_queue', JSON.stringify(offline));
-        console.warn('QZ Tray offline – job stored for retry.');
+        try {
+            const offline = JSON.parse(localStorage.getItem('sp_offline_queue') || '[]');
+            offline.push(job);
+            localStorage.setItem('sp_offline_queue', JSON.stringify(offline));
+        } catch (e) {}
+        emit('job-failed', { job });
+        console.warn('[SmartPrint] QZ Tray offline – job stored for retry.');
     }
 
     function retryOffline() {
-        const offline = JSON.parse(localStorage.getItem('sp_offline_queue') || '[]');
-        offline.forEach(job => enqueue(job));
-        localStorage.removeItem('sp_offline_queue');
-    }
-
-    async function printQZ(job) {
-        const printer = job.printer || state.currentPrinter;
-        if (!printer) return openPrinterModal(job);
-        rememberPrinter(printer);
-        const cfgOpts = { copies: job.copies || 1 };
-        if (job.type === 'pdf' && job.profile) {
-            const profile = pdfProfiles[job.profile] || pdfProfiles.default;
-            cfgOpts.size = { width: profile.width, height: profile.height };
-            cfgOpts.scaleContent = profile.scale;
-        }
-        const cfg = qz.configs.create(printer, cfgOpts);
-        let payload;
-        switch (job.type) {
-            case 'pdf': payload = [{ type: 'pdf', data: job.url }]; break;
-            case 'html': payload = [{ type: 'html', data: job.data }]; break;
-            case 'zpl':
-            case 'raw': payload = [{ type: 'raw', format: 'command', data: job.data }]; break;
-            default: return fallback(job);
-        }
-        try { await qz.print(cfg, payload); } catch { fallback(job); }
-    }
-
-    function fallback(job) {
-        if (job.type === 'pdf' && job.url) window.open(job.url, '_blank').print();
-        else if (job.type === 'html') { const w = window.open(); w.document.write(job.data); w.print(); }
-        else alert('Silent printing unavailable. Install QZ Tray.');
-    }
-
-    function openPrinterModal(job) {
-        const modal = document.createElement('div'); modal.className = 'sp-modal';
-        modal.innerHTML = `<div class="sp-box"><h3>Select Printer</h3>${state.printers.map(p => `<button>${p}</button>`).join('')}</div>`;
-        document.body.appendChild(modal);
-        modal.querySelectorAll('button').forEach(btn => {
-            btn.onclick = () => { rememberPrinter(btn.innerText); modal.remove(); enqueue(job); };
-        });
+        try {
+            const offline = JSON.parse(localStorage.getItem('sp_offline_queue') || '[]');
+            if (offline.length) {
+                offline.forEach(job => enqueue(job));
+                localStorage.removeItem('sp_offline_queue');
+            }
+        } catch (e) {}
     }
 
     // ============================
-    // DOM Binding
+    // Core print function
+    // ============================
+    async function printQZ(job) {
+        const printer = job.printer || state.currentPrinter;
+
+        if (!printer) {
+            openPrinterModal(job);
+            return;
+        }
+
+        rememberPrinter(printer);
+
+        const cfgOpts = { copies: parseInt(job.copies, 10) || 1 };
+
+        // PDF size profile support
+        const pdfProfiles = {
+            default: { width: 210, height: 297, scale: 1.0 },
+            small:   { width: 80,  height: 297, scale: 0.8 },  // thermal 80mm
+            label:   { width: 100, height: 150, scale: 1.0 },
+        };
+
+        if (job.type === 'pdf' && job.profile) {
+            const profile = pdfProfiles[job.profile] || pdfProfiles.default;
+            cfgOpts.size         = { width: profile.width, height: profile.height };
+            cfgOpts.scaleContent = profile.scale;
+            cfgOpts.units        = 'mm';
+        }
+
+        const cfg = qz.configs.create(printer, cfgOpts);
+
+        let payload;
+        switch (job.type) {
+            case 'pdf':
+                payload = [{ type: 'pdf', data: job.url }];
+                break;
+            case 'html':
+                payload = [{ type: 'html', data: job.data || job.url }];
+                break;
+            case 'zpl':
+            case 'raw':
+            case 'escpos':
+                payload = [{ type: 'raw', format: 'command', data: job.data }];
+                break;
+            default:
+                fallback(job);
+                return;
+        }
+
+        try {
+            await qz.print(cfg, payload);
+            emit('job-completed', { job });
+        } catch (err) {
+            console.error('[SmartPrint] Print error:', err);
+            emit('job-failed', { job, error: err });
+            fallback(job);
+        }
+    }
+
+    // ============================
+    // Browser fallback
+    // ============================
+    function fallback(job) {
+        emit('fallback-print', { job });
+
+        if (job.type === 'pdf' && job.url) {
+            const w = window.open(job.url, '_blank');
+            if (w) {
+                w.onload = () => { try { w.print(); } catch (_) {} };
+            }
+            return;
+        }
+
+        if (job.type === 'html') {
+            const w = window.open('', '_blank');
+            if (w) {
+                w.document.write(job.data || '');
+                w.document.close();
+                w.onload = () => { try { w.print(); } catch (_) {} };
+            }
+            return;
+        }
+
+        console.warn('[SmartPrint] Silent printing unavailable. Install QZ Tray: https://qz.io/download');
+    }
+
+    // ============================
+    // Printer selection modal
+    // ============================
+    function openPrinterModal(jobToQueue) {
+        // Remove any existing modal
+        const existing = document.getElementById('sp-printer-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id        = 'sp-printer-modal';
+        modal.className = 'sp-modal';
+        modal.style.cssText = [
+            'position:fixed', 'inset:0', 'z-index:99999',
+            'background:rgba(0,0,0,.5)', 'display:flex',
+            'align-items:center', 'justify-content:center',
+        ].join(';');
+
+        const printerButtons = state.printers.length
+            ? state.printers.map(p =>
+                `<button data-printer="${p}" style="display:block;width:100%;margin:4px 0;padding:8px;cursor:pointer;">${p}</button>`
+              ).join('')
+            : '<p style="color:#888;">No printers found. Is QZ Tray running?</p>';
+
+        modal.innerHTML = `
+            <div class="sp-box" style="background:#fff;padding:24px;border-radius:8px;min-width:280px;max-width:400px;">
+                <h3 style="margin:0 0 16px;">Select Printer</h3>
+                ${printerButtons}
+                <button id="sp-modal-cancel" style="margin-top:12px;padding:6px 12px;cursor:pointer;">Cancel</button>
+            </div>`;
+
+        document.body.appendChild(modal);
+
+        modal.querySelectorAll('[data-printer]').forEach(btn => {
+            btn.onclick = () => {
+                const printer = btn.dataset.printer;
+                rememberPrinter(printer);
+                modal.remove();
+                if (jobToQueue && (jobToQueue.url || jobToQueue.data)) {
+                    enqueue({ ...jobToQueue, printer });
+                }
+            };
+        });
+
+        modal.querySelector('#sp-modal-cancel').onclick = () => modal.remove();
+
+        // Close on backdrop click
+        modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    }
+
+    // ============================
+    // DOM Binding — supports both data-qz-print and legacy data-smart-print
     // ============================
     function bind() {
         document.addEventListener('click', e => {
-            const el = e.target.closest('[data-smart-print]');
+            const el = e.target.closest('[data-qz-print], [data-smart-print]');
             if (!el) return;
-            enqueue({ type: el.dataset.type, url: el.dataset.url, data: el.dataset.data, printer: el.dataset.printer, copies: el.dataset.copies, profile: el.dataset.profile });
+
+            // Support both attribute naming conventions
+            const url     = el.dataset.qzPrint     || el.dataset.url     || el.dataset.smartPrint;
+            const printer = el.dataset.qzPrinter   || el.dataset.printer;
+            const copies  = el.dataset.qzCopies    || el.dataset.copies;
+            const type    = el.dataset.qzType      || el.dataset.type    || 'pdf';
+            const data    = el.dataset.qzData      || el.dataset.data;
+            const profile = el.dataset.qzProfile   || el.dataset.profile;
+            const delay   = parseInt(el.dataset.qzDelay || el.dataset.delay || '0', 10);
+
+            const job = { url, printer, copies, type, data, profile };
+
+            if (delay > 0) {
+                setTimeout(() => enqueue(job), delay);
+            } else {
+                enqueue(job);
+            }
         });
-        document.querySelectorAll('[data-auto-print="true"]').forEach(el => {
-            enqueue({ type: el.dataset.type, url: el.dataset.url, data: el.dataset.data, printer: el.dataset.printer, copies: el.dataset.copies, profile: el.dataset.profile });
+
+        // Auto-print elements: data-qz-auto-print="URL" or data-auto-print="true" + data-url="URL"
+        document.querySelectorAll('[data-qz-auto-print], [data-auto-print="true"]').forEach(el => {
+            const url     = el.dataset.qzAutoPrint || el.dataset.url;
+            const printer = el.dataset.qzPrinter   || el.dataset.printer;
+            const copies  = el.dataset.qzCopies    || el.dataset.copies;
+            const type    = el.dataset.qzType      || el.dataset.type    || 'pdf';
+            const data    = el.dataset.qzData      || el.dataset.data;
+            const profile = el.dataset.qzProfile   || el.dataset.profile;
+            const delay   = parseInt(el.dataset.qzDelay || el.dataset.delay || '0', 10);
+
+            if (!url && !data) return; // nothing to print
+
+            const job = { url, printer, copies, type, data, profile };
+
+            if (delay > 0) {
+                setTimeout(() => enqueue(job), delay);
+            } else {
+                enqueue(job);
+            }
         });
     }
 
+    // ============================
+    // Queue UI
+    // ============================
     function updateQueueUI() {
-        const container = document.getElementById('sp-queue-list'); if (!container) return;
+        const container = document.getElementById('sp-queue-list');
+        if (!container) return;
+
         container.innerHTML = '';
-        state.queue.forEach(job => { const li = document.createElement('li'); li.innerHTML = `<strong>Queued:</strong> ${job.type} ${job.url || 'Raw Data'}`; container.appendChild(li); });
-        state.failedQueue.forEach((job, i) => { const li = document.createElement('li'); li.innerHTML = `<strong style="color:red;">Failed:</strong> ${job.type} ${job.url || 'Raw Data'} <button style="font-size:10px;" onclick="SmartPrint.retryJob(${i})">Retry</button>`; container.appendChild(li); });
+        state.queue.forEach(job => {
+            const li = document.createElement('li');
+            li.textContent = `Queued: ${job.type} — ${job.url || 'Raw Data'}`;
+            container.appendChild(li);
+        });
+        state.failedQueue.forEach((job, i) => {
+            const li = document.createElement('li');
+            li.style.color = 'red';
+            li.innerHTML = `Failed: ${job.type} — ${job.url || 'Raw Data'} `;
+            const btn = document.createElement('button');
+            btn.style.fontSize = '11px';
+            btn.textContent = 'Retry';
+            btn.onclick = () => retryJob(i);
+            li.appendChild(btn);
+            container.appendChild(li);
+        });
     }
 
-    function retryJob(index) { const job = state.failedQueue.splice(index, 1)[0]; enqueue(job); updateQueueUI(); }
+    function retryJob(index) {
+        const job = state.failedQueue.splice(index, 1)[0];
+        if (job) enqueue(job);
+        updateQueueUI();
+    }
 
-    document.addEventListener('keydown', e => { if (e.ctrlKey && e.shiftKey && e.key === 'P') openPrinterModal({}); });
+    // ============================
+    // Hotkey: Ctrl + Shift + P
+    // ============================
+    document.addEventListener('keydown', e => {
+        if (e.ctrlKey && e.shiftKey && e.key === 'P') {
+            e.preventDefault();
+            openPrinterModal(null);
+        }
+    });
 
-    setInterval(() => { if (window.qz && !qz.websocket.isActive()) connectQZ(1); }, 5000);
+    // ============================
+    // Auto-reconnect every 10s if disconnected
+    // ============================
+    setInterval(() => {
+        if (window.qz && !qz.websocket.isActive() && !state.connecting) {
+            connectQZ(1);
+        }
+    }, 10000);
 
+    // ============================
+    // Init on DOMContentLoaded
+    // ============================
+    function init() {
+        bind();
+        connectQZ().then(() => {
+            retryOffline();
+            updateQueueUI();
+            emit('ready', { printers: state.printers });
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    // ============================
+    // Public API
+    // ============================
     return {
-        init: () => { bind(); autoAssignPrinter(); connectQZ(); retryOffline(); updateQueueUI(); },
-        print: (data, options = {}) => { enqueue({ data, ...options }); updateQueueUI(); },
-        setPrinter: rememberPrinter,
-        listPrinters: async () => { await connectQZ(); return state.printers; },
+        // Core
+        init,
+        print: (urlOrOptions, options) => {
+            if (typeof urlOrOptions === 'string') {
+                enqueue({ url: urlOrOptions, type: 'pdf', ...options });
+            } else {
+                enqueue(urlOrOptions);
+            }
+        },
+        printRaw: (data, type, printer) => enqueue({ data, type: type || 'raw', printer }),
+        printZPL: (zpl, printer)   => enqueue({ data: zpl,   type: 'zpl',    printer }),
+        printESC: (escpos, printer) => enqueue({ data: escpos, type: 'escpos', printer }),
+
+        // Printer management
+        setPrinter:          rememberPrinter,
+        getPrinters:         async () => { await connectQZ(); return state.printers; },
+        getCurrentPrinter:   () => state.currentPrinter,
+        showPrinterSwitcher: () => openPrinterModal(null),
+
+        // Connection
+        connect:     connectQZ,
+        disconnect:  () => window.qz ? qz.websocket.disconnect() : Promise.resolve(),
+        isConnected: () => !!(window.qz && qz.websocket.isActive()),
+
+        // Queue
+        getQueue:    () => [...state.queue],
+        clearQueue:  () => { state.queue = []; updateQueueUI(); emit('queue-cleared'); },
+
+        // Settings
+        getSettings:    () => ({ defaultPrinter: state.currentPrinter }),
+        updateSettings: (s) => { if (s.defaultPrinter) rememberPrinter(s.defaultPrinter); emit('settings-updated', s); },
+
+        // Events
+        on:  (event, fn) => { state.listeners[event] = state.listeners[event] || []; state.listeners[event].push(fn); },
+        off: (event, fn) => { state.listeners[event] = (state.listeners[event] || []).filter(f => f !== fn); },
+
+        // Util
         retryOffline,
-        retryJob
+        retryJob,
+        clearCache: () => {
+            try {
+                Object.keys(localStorage)
+                    .filter(k => k.startsWith(STORAGE_PREFIX) || k === GLOBAL_KEY || k === 'sp_offline_queue')
+                    .forEach(k => localStorage.removeItem(k));
+            } catch (e) {}
+            emit('cache-cleared');
+        },
     };
 })();
+
+// ============================
+// Global shorthand helpers
+// ============================
+function smartPrint(url, options) {
+    return SmartPrint.print(url, options);
+}
+function smartPrintZPL(zpl, printer) {
+    return SmartPrint.printZPL(zpl, printer);
+}
+function smartPrintESC(escpos, printer) {
+    return SmartPrint.printESC(escpos, printer);
+}

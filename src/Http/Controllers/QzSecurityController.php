@@ -6,13 +6,10 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
-use Mpdf\Mpdf;
+use Illuminate\Support\Facades\Log;
 
 class QzSecurityController extends Controller
 {
-    /**
-     * Show QZ Tray test page
-     */
     public function index()
     {
         return view('qz-tray::default');
@@ -23,16 +20,12 @@ class QzSecurityController extends Controller
         return view('qz-tray::smart');
     }
 
-    /**
-     * Serve the public certificate for QZ Tray.
-     * ONLY the certificate (not private key) should be exposed.
-     */
     public function certificate(): \Illuminate\Http\Response
     {
         $certPath = config('qz-tray.cert_path');
 
-        if (! file_exists($certPath)) {
-            abort(404, 'Certificate not found');
+        if (! $certPath || ! file_exists($certPath)) {
+            abort(404, 'Certificate not found. Run: php artisan qz:generate-certificate');
         }
 
         return response(
@@ -46,123 +39,116 @@ class QzSecurityController extends Controller
         );
     }
 
-    /**
-     * Sign data for QZ Tray requests.
-     */
     public function sign(Request $request): \Illuminate\Http\Response
     {
         $data = $request->input('data');
 
         if (! $data) {
-            abort(400, 'Missing data');
+            abort(400, 'Missing data parameter');
         }
 
         $keyPath = config('qz-tray.key_path');
 
-        if (! file_exists($keyPath)) {
-            abort(500, 'Private key missing');
+        if (! $keyPath || ! file_exists($keyPath)) {
+            abort(500, 'Private key missing. Run: php artisan qz:generate-certificate');
         }
 
-        $privateKey = openssl_pkey_get_private(
-            file_get_contents($keyPath)
-        );
+        $privateKey = openssl_pkey_get_private(file_get_contents($keyPath));
 
         if (! $privateKey) {
-            abort(500, 'Invalid private key');
+            abort(500, 'Invalid private key. Run: php artisan qz:generate-certificate --force');
         }
 
         $signature = null;
+        $signed = openssl_sign($data, $signature, $privateKey, OPENSSL_ALGO_SHA512);
 
-        openssl_sign(
-            $data,
-            $signature,
-            $privateKey,
-            OPENSSL_ALGO_SHA512
-        );
+        if (PHP_VERSION_ID < 80000) {
+            openssl_free_key($privateKey);
+        }
 
-        openssl_free_key($privateKey);
+        if (! $signed || $signature === null) {
+            abort(500, 'Failed to sign data');
+        }
 
-        return response(
-            base64_encode($signature),
-            200,
-            ['Content-Type' => 'text/plain']
-        );
+        return response(base64_encode($signature), 200, ['Content-Type' => 'text/plain']);
     }
 
-    /**
-     * Get QZ Tray status
-     */
     public function status(): \Illuminate\Http\JsonResponse
     {
-        $certExists = file_exists(config('qz-tray.cert_path'));
-        $keyExists = file_exists(config('qz-tray.key_path'));
+        $certPath = config('qz-tray.cert_path');
+        $keyPath  = config('qz-tray.key_path');
+        $certExists = $certPath && file_exists($certPath);
+        $keyExists  = $keyPath  && file_exists($keyPath);
+        $prefix = config('qz-tray.routes.prefix', 'qz');
 
         return response()->json([
-            'success' => true,
-            'status' => 'operational',
+            'success'     => true,
+            'status'      => ($certExists && $keyExists) ? 'operational' : 'degraded',
             'certificate' => $certExists ? 'present' : 'missing',
-            'private_key' => $keyExists ? 'present' : 'missing',
-            'endpoints' => [
-                'certificate' => url('/qz/certificate'),
-                'sign' => url('/qz/sign'),
+            'private_key' => $keyExists  ? 'present' : 'missing',
+            'endpoints'   => [
+                'certificate' => url("/{$prefix}/certificate"),
+                'sign'        => url("/{$prefix}/sign"),
             ],
-            'version' => '1.0.0',
+            'version'   => '1.0.0',
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    /**
-     * Health check
-     */
     public function health(): \Illuminate\Http\JsonResponse
     {
         return response()->json([
-            'status' => 'healthy',
-            'service' => 'qz-tray',
+            'status'    => 'healthy',
+            'service'   => 'qz-tray',
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    /**
-     * Set printer for a specific path
-     */
     public function setPrinter(Request $request): \Illuminate\Http\JsonResponse
     {
         $validated = $request->validate([
             'printer' => 'required|string|max:255',
-            'path' => 'required|string|max:255',
+            'path'    => 'required|string|max:500',
         ]);
 
-        $key = "qz.printer.{$validated['path']}";
-        $ttl = config('qz-tray.printer_cache_duration');
+        $safePath = preg_replace('/[^a-zA-Z0-9\-_\/]/', '_', $validated['path']);
+        $key = 'qz.printer.' . $safePath;
+        $ttl = config('qz-tray.printer_cache_duration', 86400);
 
         Cache::put($key, $validated['printer'], $ttl);
+
+        // Track keys so qz:clear-cache can find all of them
+        $keys = Cache::get('qz.printer_keys', []);
+        if (! in_array($key, $keys)) {
+            $keys[] = $key;
+            Cache::put('qz.printer_keys', $keys, $ttl);
+        }
+
         session()->put($key, $validated['printer']);
 
         return response()->json([
             'success' => true,
             'printer' => $validated['printer'],
-            'path' => $validated['path'],
+            'path'    => $validated['path'],
         ]);
     }
 
-    /**
-     * Get printer for a specific path
-     */
     public function getPrinter(string $path): \Illuminate\Http\JsonResponse
     {
-        $key = "qz.printer.{$path}";
+        $safePath = preg_replace('/[^a-zA-Z0-9\-_\/]/', '_', $path);
+        $key = 'qz.printer.' . $safePath;
+
+        $printer = session()->get($key)
+            ?? Cache::get($key)
+            ?? config('qz-tray.default_printer');
 
         return response()->json([
             'success' => true,
-            'printer' => session()->get($key) ?? Cache::get($key) ?? config('qz-tray.default_printer'),
-            'path' => $path,
+            'printer' => $printer,
+            'path'    => $path,
         ]);
     }
 
-    /**
-     * Clear printer cache
-     */
     public function clearCache(): \Illuminate\Http\JsonResponse
     {
         foreach (session()->all() as $key => $value) {
@@ -171,76 +157,78 @@ class QzSecurityController extends Controller
             }
         }
 
+        $keys = Cache::get('qz.printer_keys', []);
+        foreach ($keys as $key) {
+            Cache::forget($key);
+        }
+        Cache::forget('qz.printer_keys');
+
         return response()->json([
-            'success' => true,
-            'message' => 'Printer cache cleared',
+            'success'   => true,
+            'message'   => 'Printer cache cleared',
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    /**
-     * Return available printers (UI endpoint only)
-     */
     public function printers(): \Illuminate\Http\JsonResponse
     {
         return response()->json([
             'success' => true,
             'message' => 'Use QZ Tray WebSocket connection to get printers',
-            'note' => 'This endpoint is UI only',
+            'note'    => 'This endpoint is UI / status only',
         ]);
     }
 
-    /**
-     * Print job endpoint (dummy)
-     */
     public function print(Request $request): \Illuminate\Http\JsonResponse
     {
         $request->validate([
             'printer' => 'required|string',
-            'type' => 'required|in:raw,pdf,html',
-            'data' => 'required',
+            'type'    => 'required|in:raw,pdf,html,zpl,escpos',
+            'data'    => 'required',
         ]);
 
+        $jobId = uniqid('qz_', true);
+
+        if (config('qz-tray.logging.enabled', false)) {
+            Log::channel(config('qz-tray.logging.channel', 'stack'))
+                ->info('[QZ Tray] Print job received', [
+                    'job_id'  => $jobId,
+                    'printer' => $request->input('printer'),
+                    'type'    => $request->input('type'),
+                ]);
+        }
+
         return response()->json([
-            'success' => true,
-            'message' => 'Print job accepted',
-            'job_id' => uniqid('qz_'),
-            'printer' => $request->input('printer'),
-            'type' => $request->input('type'),
+            'success'   => true,
+            'message'   => 'Print job accepted',
+            'job_id'    => $jobId,
+            'printer'   => $request->input('printer'),
+            'type'      => $request->input('type'),
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    /**
-     * List active print jobs (dummy)
-     */
     public function jobs(): \Illuminate\Http\JsonResponse
     {
         return response()->json([
             'success' => true,
-            'jobs' => [],
+            'jobs'    => [],
             'message' => 'No active print jobs',
         ]);
     }
 
-    /**
-     * Cancel print job (dummy)
-     */
     public function cancelJob($id): \Illuminate\Http\JsonResponse
     {
         return response()->json([
             'success' => true,
             'message' => "Print job {$id} cancelled",
-            'job_id' => $id,
+            'job_id'  => $id,
         ]);
     }
 
-    /**
-     * Installer info endpoint
-     */
     public function installer(string $os): \Illuminate\Http\JsonResponse
     {
-        $os = strtolower($os);
+        $os      = strtolower($os);
         $allowed = ['windows', 'linux', 'macos'];
 
         if (! in_array($os, $allowed)) {
@@ -248,65 +236,159 @@ class QzSecurityController extends Controller
         }
 
         return response()->json([
-            'success' => true,
-            'message' => "Installer info for {$os}",
+            'success'      => true,
+            'message'      => "Installer info for {$os}",
             'download_url' => 'https://qz.io/download',
         ]);
     }
 
     /**
-     * Test PDF endpoint
+     * Test PDF endpoint — no external dependency required.
+     * If barryvdh/laravel-dompdf is installed it will produce a real PDF.
      */
     public function testPdf(): Response
     {
-        $mpdf = new Mpdf;
-        $html = '
-            <h1>Hello world!</h1>
-            <p>This is a sample PDF generated using mPDF. It supports
-            <span style="color: blue;">CSS styles</span> and UTF-8.</p>
-        ';
+        $html = '<!DOCTYPE html><html><head><meta charset="utf-8">
+            <title>QZ Tray Test PDF</title>
+            <style>body{font-family:sans-serif;margin:40px;}h1{color:#333;}</style>
+        </head><body>
+            <h1>QZ Tray Test Document</h1>
+            <p>This is a test document generated by Laravel QZ Tray.</p>
+            <p>Generated: ' . now()->toDateTimeString() . '</p>
+        </body></html>';
 
-        $mpdf->WriteHTML($html);
+        if (class_exists(\Barryvdh\DomPDF\Facade\Pdf::class)) {
+            return \Barryvdh\DomPDF\Facade\Pdf::loadHTML($html)->stream('qz-test.pdf');
+        }
 
-        $mpdf->Output('document_name.pdf', 'I');
-
+        // Fallback: return HTML so the browser can render / print it
+        return response($html, 200, ['Content-Type' => 'text/html']);
     }
 
-    /**
-     * Test connection endpoint
-     */
     public function testConnection(): \Illuminate\Http\JsonResponse
     {
+        $prefix = config('qz-tray.routes.prefix', 'qz');
+
         return response()->json([
-            'success' => true,
-            'message' => 'QZ Tray API is working',
+            'success'   => true,
+            'message'   => 'QZ Tray API is working',
             'endpoints' => [
-                'certificate' => '/qz/certificate',
-                'sign' => '/qz/sign',
-                'status' => '/qz/status',
-                'health' => '/qz/health',
+                'certificate' => "/{$prefix}/certificate",
+                'sign'        => "/{$prefix}/sign",
+                'status'      => "/{$prefix}/status",
+                'health'      => "/{$prefix}/health",
             ],
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    /**
-     * Setup endpoint (dummy)
-     */
     public function setup(): \Illuminate\Http\JsonResponse
     {
         $certPath = config('qz-tray.cert_path');
-        $keyPath = config('qz-tray.key_path');
+        $keyPath  = config('qz-tray.key_path');
+        $prefix   = config('qz-tray.routes.prefix', 'qz');
 
         return response()->json([
-            'success' => true,
-            'certificate' => file_exists($certPath) ? 'exists' : 'missing',
-            'private_key' => file_exists($keyPath) ? 'exists' : 'missing',
-            'endpoints' => [
-                'certificate' => url('/qz/certificate'),
-                'sign' => url('/qz/sign'),
-                'status' => url('/qz/status'),
+            'success'     => true,
+            'certificate' => ($certPath && file_exists($certPath)) ? 'exists' : 'missing',
+            'private_key' => ($keyPath  && file_exists($keyPath))  ? 'exists' : 'missing',
+            'endpoints'   => [
+                'certificate' => url("/{$prefix}/certificate"),
+                'sign'        => url("/{$prefix}/sign"),
+                'status'      => url("/{$prefix}/status"),
             ],
+        ]);
+    }
+
+    /**
+     * Generate certificate via HTTP (disabled by default for security).
+     * Enable with: 'allow_public_cert_generate' => true in config.
+     */
+    public function generateCertificatePublic(): \Illuminate\Http\JsonResponse
+    {
+        if (! config('qz-tray.allow_public_cert_generate', false)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Public certificate generation is disabled. Use: php artisan qz:generate-certificate',
+            ], 403);
+        }
+
+        if (! extension_loaded('openssl')) {
+            return response()->json(['success' => false, 'message' => 'OpenSSL extension not available'], 500);
+        }
+
+        $certPath   = config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt'));
+        $keyPath    = config('qz-tray.key_path',  storage_path('qz/private-key.pem'));
+        $certConfig = config('qz-tray.certificate', []);
+
+        $opensslConfig = [
+            'digest_alg'       => $certConfig['algorithm'] ?? 'sha256',
+            'private_key_bits' => $certConfig['key_bits']  ?? 2048,
+            'private_key_type' => OPENSSL_KEYTYPE_RSA,
+        ];
+        $subject = $certConfig['subject'] ?? [
+            'countryName'      => 'US',
+            'organizationName' => 'QZ Tray',
+            'commonName'       => 'QZ Tray Certificate',
+        ];
+
+        $privateKey = openssl_pkey_new($opensslConfig);
+        if (! $privateKey) {
+            return response()->json(['success' => false, 'message' => 'Failed to generate private key'], 500);
+        }
+
+        openssl_pkey_export($privateKey, $privateKeyPem);
+        $csr  = openssl_csr_new($subject, $privateKey, $opensslConfig);
+        $cert = openssl_csr_sign($csr, null, $privateKey, $certConfig['validity_days'] ?? 7300, $opensslConfig, time());
+
+        if (! $cert) {
+            return response()->json(['success' => false, 'message' => 'Failed to create certificate'], 500);
+        }
+
+        openssl_x509_export($cert, $certificatePem);
+
+        $dir = dirname($certPath);
+        if (! is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        file_put_contents($certPath, $certificatePem);
+        file_put_contents($keyPath,  $privateKeyPem);
+        chmod($certPath, 0644);
+        chmod($keyPath,  0600);
+
+        return response()->json([
+            'success'   => true,
+            'message'   => 'Certificate generated successfully',
+            'timestamp' => now()->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * Test-sign endpoint — verifies signing pipeline end-to-end.
+     */
+    public function testSign(): \Illuminate\Http\JsonResponse
+    {
+        $keyPath = config('qz-tray.key_path');
+
+        if (! $keyPath || ! file_exists($keyPath)) {
+            return response()->json(['success' => false, 'message' => 'Private key missing'], 500);
+        }
+
+        $privateKey = openssl_pkey_get_private(file_get_contents($keyPath));
+        if (! $privateKey) {
+            return response()->json(['success' => false, 'message' => 'Invalid private key'], 500);
+        }
+
+        $testData  = 'qz_test_' . time();
+        $signature = null;
+        $ok        = openssl_sign($testData, $signature, $privateKey, OPENSSL_ALGO_SHA512);
+
+        return response()->json([
+            'success'   => $ok,
+            'message'   => $ok ? 'Signing works correctly' : 'Signing failed',
+            'algorithm' => 'SHA512',
+            'timestamp' => now()->toIso8601String(),
         ]);
     }
 }

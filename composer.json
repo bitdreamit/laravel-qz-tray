@@ -18,8 +18,8 @@
         "ext-openssl": "*"
     },
     "require-dev": {
-        "orchestra/testbench": "^8.0",
-        "phpunit/phpunit": "^10.0"
+        "orchestra/testbench": "^8.0|^9.0",
+        "phpunit/phpunit": "^10.0|^11.0"
     },
     "autoload": {
         "psr-4": {
@@ -35,10 +35,7 @@
         "laravel": {
             "providers": [
                 "Bitdreamit\\QzTray\\QzTrayServiceProvider"
-            ],
-            "aliases": {
-                "QzTray": "Bitdreamit\\QzTray\\Facades\\QzTray"
-            }
+            ]
         }
     },
     "scripts": {
