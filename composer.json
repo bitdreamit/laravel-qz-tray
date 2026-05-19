@@ -1,8 +1,17 @@
 {
     "name": "bitdreamit/laravel-qz-tray",
+    "version": "1.0.0",
     "description": "Enterprise silent printing with QZ Tray for Laravel - Zero configuration, automatic certificate, browser caching",
     "type": "library",
-    "keywords": ["laravel", "qz-tray", "printing", "thermal", "receipt", "zpl", "escpos"],
+    "keywords": [
+        "laravel",
+        "qz-tray",
+        "printing",
+        "thermal",
+        "receipt",
+        "zpl",
+        "escpos"
+    ],
     "license": "MIT",
     "authors": [
         {
