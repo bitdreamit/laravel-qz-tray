@@ -216,10 +216,13 @@
     generateFromTemplate(template, data) {
         let zpl = template;
 
-        // Replace placeholders
+        // Replace placeholders — escape regex special chars in the placeholder
+        // so keys containing {, }, ., *, +, ?, etc. don't break the pattern.
+        const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
         for (const [key, value] of Object.entries(data)) {
-            const placeholder = `{{${key}}}`;
-            zpl = zpl.replace(new RegExp(placeholder, 'g'), value);
+            const placeholder = escapeRegExp(`{{${key}}}`);
+            zpl = zpl.replace(new RegExp(placeholder, 'g'), String(value));
         }
 
         return zpl;

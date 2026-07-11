@@ -101,8 +101,13 @@ window.SmartPrint = (() => {
             return true;
         } catch (err) {
             if (retries > 0) {
-                // Attempt to launch QZ Tray if not running
-                try { window.location.assign('qz:launch'); } catch (_) {}
+                // Attempt to launch QZ Tray via a hidden iframe so we don't
+                // navigate the current page away (which `location.assign`
+                // would do). The protocol handler `qz:launch` is ignored
+                // silently by the browser when QZ Tray isn't installed.
+                try {
+                    launchQZProtocol();
+                } catch (_) {}
                 await new Promise(r => setTimeout(r, 1500));
                 state.connecting = false;
                 return connectQZ(retries - 1);
@@ -113,6 +118,21 @@ window.SmartPrint = (() => {
         } finally {
             state.connecting = false;
         }
+    }
+
+    // Trigger the `qz:launch` protocol handler without leaving the page.
+    // Uses a hidden iframe so a missing handler does not produce a
+    // "The address wasn't understood" navigation.
+    function launchQZProtocol() {
+        const existing = document.getElementById('sp-qz-launch');
+        if (existing) existing.remove();
+        const iframe = document.createElement('iframe');
+        iframe.id = 'sp-qz-launch';
+        iframe.style.display = 'none';
+        iframe.src = 'qz:launch';
+        document.body.appendChild(iframe);
+        // Clean up after a short delay so the protocol is invoked.
+        setTimeout(() => { if (iframe.parentNode) iframe.remove(); }, 2000);
     }
 
     // ============================
@@ -243,14 +263,29 @@ window.SmartPrint = (() => {
         let payload;
         switch (job.type) {
             case 'pdf':
+                if (!job.url) {
+                    console.error('[SmartPrint] PDF print requires a url.');
+                    emit('job-failed', { job, error: new Error('Missing PDF url') });
+                    return;
+                }
                 payload = [{ type: 'pdf', data: job.url }];
                 break;
             case 'html':
+                if (!job.data && !job.url) {
+                    console.error('[SmartPrint] HTML print requires data or url.');
+                    emit('job-failed', { job, error: new Error('Missing HTML data') });
+                    return;
+                }
                 payload = [{ type: 'html', data: job.data || job.url }];
                 break;
             case 'zpl':
             case 'raw':
             case 'escpos':
+                if (!job.data) {
+                    console.error('[SmartPrint] ' + job.type + ' print requires data.');
+                    emit('job-failed', { job, error: new Error('Missing raw data') });
+                    return;
+                }
                 payload = [{ type: 'raw', format: 'command', data: job.data }];
                 break;
             default:
@@ -352,6 +387,9 @@ window.SmartPrint = (() => {
             const el = e.target.closest('[data-qz-print], [data-smart-print]');
             if (!el) return;
 
+            // Prevent default so buttons inside <form> don't submit.
+            e.preventDefault();
+
             // Support both attribute naming conventions
             const url     = el.dataset.qzPrint     || el.dataset.url     || el.dataset.smartPrint;
             const printer = el.dataset.qzPrinter   || el.dataset.printer;
@@ -361,7 +399,7 @@ window.SmartPrint = (() => {
             const profile = el.dataset.qzProfile   || el.dataset.profile;
             const delay   = parseInt(el.dataset.qzDelay || el.dataset.delay || '0', 10);
 
-            const job = { url, printer, copies, type, data, profile };
+            const job = { url, printer, copies: parseInt(copies, 10) || 1, type, data, profile };
 
             if (delay > 0) {
                 setTimeout(() => enqueue(job), delay);
@@ -382,7 +420,7 @@ window.SmartPrint = (() => {
 
             if (!url && !data) return; // nothing to print
 
-            const job = { url, printer, copies, type, data, profile };
+            const job = { url, printer, copies: parseInt(copies, 10) || 1, type, data, profile };
 
             if (delay > 0) {
                 setTimeout(() => enqueue(job), delay);
@@ -428,7 +466,9 @@ window.SmartPrint = (() => {
     // Hotkey: Ctrl + Shift + P
     // ============================
     document.addEventListener('keydown', e => {
-        if (e.ctrlKey && e.shiftKey && e.key === 'P') {
+        // `e.key` is 'P' (uppercase) when Shift is held on most layouts.
+        // Accept both 'P' and 'p' for robustness across keyboard layouts.
+        if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
             e.preventDefault();
             openPrinterModal(null);
         }
@@ -439,7 +479,9 @@ window.SmartPrint = (() => {
     // ============================
     setInterval(() => {
         if (window.qz && !qz.websocket.isActive() && !state.connecting) {
-            connectQZ(1);
+            connectQZ(1).catch(() => {
+                // Swallow — the connection-failed event already fires inside.
+            });
         }
     }, 10000);
 
@@ -469,14 +511,17 @@ window.SmartPrint = (() => {
         init,
         print: (urlOrOptions, options) => {
             if (typeof urlOrOptions === 'string') {
-                enqueue({ url: urlOrOptions, type: 'pdf', ...options });
+                enqueue({ url: urlOrOptions, type: 'pdf', copies: 1, ...options });
             } else {
-                enqueue(urlOrOptions);
+                // Normalise copies to an integer so downstream code can rely on it.
+                const job = { ...urlOrOptions };
+                if (job.copies !== undefined) job.copies = parseInt(job.copies, 10) || 1;
+                enqueue(job);
             }
         },
-        printRaw: (data, type, printer) => enqueue({ data, type: type || 'raw', printer }),
-        printZPL: (zpl, printer)   => enqueue({ data: zpl,   type: 'zpl',    printer }),
-        printESC: (escpos, printer) => enqueue({ data: escpos, type: 'escpos', printer }),
+        printRaw: (data, type, printer) => enqueue({ data, type: type || 'raw', printer, copies: 1 }),
+        printZPL: (zpl, printer)   => enqueue({ data: zpl,   type: 'zpl',    printer, copies: 1 }),
+        printESC: (escpos, printer) => enqueue({ data: escpos, type: 'escpos', printer, copies: 1 }),
 
         // Printer management
         setPrinter:          rememberPrinter,

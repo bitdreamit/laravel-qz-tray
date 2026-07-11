@@ -28,13 +28,19 @@ class QzSecurityController extends Controller
             abort(404, 'Certificate not found. Run: php artisan qz:generate-certificate');
         }
 
+        // Respect cert_ttl config (seconds the browser may cache the cert).
+        // Falls back to 0 (no caching) when not configured.
+        $ttl = (int) config('qz-tray.cert_ttl', 0);
+
         return response(
             file_get_contents($certPath),
             200,
             [
-                'Content-Type' => 'text/plain',
-                'Cache-Control' => 'no-store, no-cache, must-revalidate',
-                'Pragma' => 'no-cache',
+                'Content-Type'  => 'text/plain',
+                'Cache-Control' => $ttl > 0
+                    ? 'public, max-age=' . $ttl
+                    : 'no-store, no-cache, must-revalidate',
+                'Pragma'        => 'no-cache',
             ]
         );
     }
@@ -43,8 +49,8 @@ class QzSecurityController extends Controller
     {
         $data = $request->input('data');
 
-        if (! $data) {
-            abort(400, 'Missing data parameter');
+        if (! is_string($data) || $data === '') {
+            abort(400, 'Missing or invalid data parameter');
         }
 
         $keyPath = config('qz-tray.key_path');
@@ -181,20 +187,51 @@ class QzSecurityController extends Controller
 
     public function print(Request $request): \Illuminate\Http\JsonResponse
     {
-        $request->validate([
-            'printer' => 'required|string',
-            'type'    => 'required|in:raw,pdf,html,zpl,escpos',
-            'data'    => 'required',
+        $validated = $request->validate([
+            'printer'    => 'required|string|max:255',
+            'type'       => 'required|in:raw,pdf,html,zpl,escpos',
+            'data'       => 'required_without:url|nullable|string',
+            'url'        => 'required_without:data|nullable|string|max:2048',
+            'copies'     => 'nullable|integer|min:1|max:999',
+            'document'   => 'nullable|string|max:255',
+            'metadata'   => 'nullable|array',
         ]);
 
         $jobId = uniqid('qz_', true);
+        $type  = $request->input('type');
+
+        // Persist to database when the qz_print_jobs table exists.
+        // This makes the migration that ships with the package actually useful.
+        $dbLogged = false;
+        if (\Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+            try {
+                $user = $request->user();
+                \DB::table('qz_print_jobs')->insert([
+                    'tenant_id'     => null,
+                    'user_id'       => $user?->getAuthIdentifier(),
+                    'user_type'     => $user ? get_class($user) : null,
+                    'printer_name'  => $request->input('printer'),
+                    'document_url'  => $request->input('url', ''),
+                    'document_type' => $type,
+                    'copies'        => (int) $request->input('copies', 1),
+                    'status'        => 'pending',
+                    'metadata'      => json_encode($request->input('metadata', [])),
+                    'created_at'    => now(),
+                    'updated_at'    => now(),
+                ]);
+                $dbLogged = true;
+            } catch (\Throwable $e) {
+                Log::warning('[QZ Tray] Could not persist print job to DB: ' . $e->getMessage());
+            }
+        }
 
         if (config('qz-tray.logging.enabled', false)) {
             Log::channel(config('qz-tray.logging.channel', 'stack'))
                 ->info('[QZ Tray] Print job received', [
                     'job_id'  => $jobId,
                     'printer' => $request->input('printer'),
-                    'type'    => $request->input('type'),
+                    'type'    => $type,
+                    'db'      => $dbLogged,
                 ]);
         }
 
@@ -203,7 +240,8 @@ class QzSecurityController extends Controller
             'message'   => 'Print job accepted',
             'job_id'    => $jobId,
             'printer'   => $request->input('printer'),
-            'type'      => $request->input('type'),
+            'type'      => $type,
+            'db_logged' => $dbLogged,
             'timestamp' => now()->toIso8601String(),
         ]);
     }
@@ -226,7 +264,7 @@ class QzSecurityController extends Controller
         ]);
     }
 
-    public function installer(string $os): \Illuminate\Http\JsonResponse
+    public function installer(string $os): \Symfony\Component\HttpFoundation\BinaryFileResponse|\Illuminate\Http\JsonResponse
     {
         $os      = strtolower($os);
         $allowed = ['windows', 'linux', 'macos'];
@@ -235,10 +273,29 @@ class QzSecurityController extends Controller
             return response()->json(['success' => false, 'message' => 'Invalid OS specified'], 400);
         }
 
+        $fileName   = config("qz-tray.installers.{$os}");
+        $publicPath = public_path("vendor/qz-tray/installers/{$fileName}");
+
+        // Serve the bundled installer when it was published and exists.
+        if ($fileName && is_file($publicPath)) {
+            $mime = [
+                'windows' => 'application/vnd.microsoft.portable-executable',
+                'linux'   => 'application/vnd.debian.binary-package',
+                'macos'   => 'application/vnd.apple.installer+xml',
+            ][$os] ?? 'application/octet-stream';
+
+            return response()->download($publicPath, $fileName, [
+                'Content-Type'        => $mime,
+                'Content-Disposition' => 'attachment; filename="' . $fileName . '"',
+            ]);
+        }
+
+        // Fallback: return JSON pointing to the official download page.
         return response()->json([
             'success'      => true,
             'message'      => "Installer info for {$os}",
             'download_url' => 'https://qz.io/download',
+            'note'         => 'Bundled installer not published. Run: php artisan vendor:publish --tag=qz-installers',
         ]);
     }
 
@@ -338,7 +395,10 @@ class QzSecurityController extends Controller
         }
 
         openssl_pkey_export($privateKey, $privateKeyPem);
-        $csr  = openssl_csr_new($subject, $privateKey, $opensslConfig);
+        $csr = openssl_csr_new($subject, $privateKey, $opensslConfig);
+        if (! $csr) {
+            return response()->json(['success' => false, 'message' => 'Failed to create CSR'], 500);
+        }
         $cert = openssl_csr_sign($csr, null, $privateKey, $certConfig['validity_days'] ?? 7300, $opensslConfig, time());
 
         if (! $cert) {

@@ -36,6 +36,12 @@ class QzTrayServiceProvider extends ServiceProvider
 
         $this->loadRoutesFrom(__DIR__.'/../routes/web.php');
 
+        // Optionally load API routes when the host app wants a stateless,
+        // sanctum-protected surface. Enabled via config('qz-tray.routes.api.enabled').
+        if (config('qz-tray.routes.api.enabled', false)) {
+            $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
+        }
+
         if (config('qz-tray.auto_generate_cert', false)) {
             $this->autoGenerateCertificate();
         }

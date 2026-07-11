@@ -181,7 +181,9 @@
         async selectCurrentPrinter() {
             try {
                 if (window.SmartPrint && window.SmartPrint.getCurrentPrinter) {
-                    const current = await window.SmartPrint.getCurrentPrinter();
+                    // getCurrentPrinter is synchronous (returns a string, not a Promise),
+                    // so we read it directly without `await` to avoid confusion.
+                    const current = window.SmartPrint.getCurrentPrinter();
                     if (current) {
                         this.selectElement.value = current;
                     }
@@ -205,9 +207,16 @@
                 }
             });
 
-            // Close on click outside
-            document.addEventListener('click', (e) => {
-                if (this.isVisible && !this.container.contains(e.target)) {
+            // Close on click outside — use mousedown so it fires before the
+            // button's click handler that toggles visibility, preventing the
+            // race where the opener click immediately closes the switcher.
+            document.addEventListener('mousedown', (e) => {
+                if (this.isVisible && this.container && !this.container.contains(e.target)) {
+                    // Don't close if the click target is the opener button itself —
+                    // the opener's own handler will toggle the switcher.
+                    if (e.target && e.target.dataset && e.target.dataset.qzSwitcher !== undefined) {
+                        return;
+                    }
                     this.hide();
                 }
             });
@@ -215,7 +224,7 @@
             // Show on hotkey
             if (this.options.showOnHotkey) {
                 document.addEventListener('keydown', (e) => {
-                    if (e.ctrlKey && e.shiftKey && e.key === 'P') {
+                    if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
                         e.preventDefault();
                         this.show();
                     }

@@ -47,7 +47,10 @@ class GenerateCertificate extends Command
         $this->line('  Generating private key...');
         $privateKey = openssl_pkey_new($opensslConfig);
         if (! $privateKey) {
-            $this->error('❌ Failed to generate private key: '.openssl_error_string());
+            // `openssl_error_string` returns false when there is no error, so
+            // we need to guard against that before string concatenation.
+            $err = openssl_error_string() ?: 'unknown error';
+            $this->error('❌ Failed to generate private key: ' . $err);
             return 1;
         }
 
@@ -66,14 +69,16 @@ class GenerateCertificate extends Command
         $this->line('  Creating certificate signing request...');
         $csr = openssl_csr_new($subject, $privateKey, $opensslConfig);
         if (! $csr) {
-            $this->error('❌ Failed to create CSR: '.openssl_error_string());
+            $err = openssl_error_string() ?: 'unknown error';
+            $this->error('❌ Failed to create CSR: ' . $err);
             return 1;
         }
 
         $validityDays = $certConfig['validity_days'] ?? 7300;
         $cert         = openssl_csr_sign($csr, null, $privateKey, $validityDays, $opensslConfig, time());
         if (! $cert) {
-            $this->error('❌ Failed to sign certificate: '.openssl_error_string());
+            $err = openssl_error_string() ?: 'unknown error';
+            $this->error('❌ Failed to sign certificate: ' . $err);
             return 1;
         }
 
@@ -143,7 +148,8 @@ class GenerateCertificate extends Command
         if (openssl_sign($testData, $signature, $key, OPENSSL_ALGO_SHA512)) {
             $this->line('  ✅ SHA512 signing works');
         } else {
-            $this->warn('  ⚠️  SHA512 signing failed: '.openssl_error_string());
+            $err = openssl_error_string() ?: 'unknown error';
+            $this->warn('  ⚠️  SHA512 signing failed: ' . $err);
         }
 
         // openssl_free_key / openssl_x509_free are no-ops / deprecated in PHP 8+

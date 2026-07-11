@@ -118,9 +118,10 @@
                 if (window.SmartPrint) {
                     this.isConnected = window.SmartPrint.isConnected();
 
-                    // Get current printer
+                    // Get current printer — getCurrentPrinter is synchronous,
+                    // so we read it directly instead of awaiting it.
                     if (window.SmartPrint.getCurrentPrinter) {
-                        this.printerName = await window.SmartPrint.getCurrentPrinter();
+                        this.printerName = window.SmartPrint.getCurrentPrinter();
                     }
                 }
 

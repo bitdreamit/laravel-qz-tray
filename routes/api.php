@@ -3,8 +3,23 @@
 use Illuminate\Support\Facades\Route;
 use Bitdreamit\QzTray\Http\Controllers\QzSecurityController;
 
-// API routes (sanctum protected)
-Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
+$apiConfig = config('qz-tray.routes.api', [
+    'enabled'    => false,
+    'prefix'     => 'api/qz',
+    'middleware' => ['auth:sanctum', 'throttle:60,1'],
+]);
+
+// Guard: only register when explicitly enabled in config.
+// The provider also checks this flag before loading the file, but we keep
+// the guard here too so the file is safe to load on its own.
+if (! ($apiConfig['enabled'] ?? false)) {
+    return;
+}
+
+Route::group([
+    'prefix'     => $apiConfig['prefix'] ?? 'api/qz',
+    'middleware' => $apiConfig['middleware'] ?? ['auth:sanctum', 'throttle:60,1'],
+], function () {
 
     // Printer management
     Route::get('/printers', [QzSecurityController::class, 'printers'])

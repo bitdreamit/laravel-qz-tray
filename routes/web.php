@@ -5,9 +5,15 @@ use Illuminate\Support\Facades\Route;
 
 $config = config('qz-tray.routes', ['prefix' => 'qz', 'middleware' => ['web']]);
 
+// Build the middleware stack, merging in the optional throttle middleware.
+$middleware = $config['middleware'] ?? ['web'];
+if (! empty($config['throttle'])) {
+    $middleware[] = 'throttle:' . $config['throttle'];
+}
+
 Route::group([
-    'prefix' => $config['prefix'] ?? 'qz',
-    'middleware' => $config['middleware'] ?? ['web'],
+    'prefix'     => $config['prefix'] ?? 'qz',
+    'middleware' => $middleware,
 ], function () {
 
     // Security endpoints

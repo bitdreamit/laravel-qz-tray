@@ -22,6 +22,7 @@ class InstallQzTray extends Command
         $this->publishStep('🗃️  Publishing migrations...', 'qz-migrations');
         $this->publishStep('📄 Publishing blade views...', 'qz-blade');
         $this->publishStep('📦 Publishing JavaScript assets...', 'qz-assets');
+        $this->publishStep('💿 Publishing QZ Tray installers...', 'qz-installers');
 
         // Ensure certificate storage directory exists
         $certDir = dirname(config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt')));

@@ -19,7 +19,10 @@ return [
         'validity_days' => 7300,
         'algorithm'     => 'sha256',
         'key_bits'      => 2048,
-        'key_type'      => OPENSSL_KEYTYPE_RSA,
+        // Use integer 0 (= OPENSSL_KEYTYPE_RSA) so the config can be cached
+        // via `php artisan config:cache` even when the openssl extension is
+        // not loaded at cache time. OPENSSL_KEYTYPE_RSA === 0.
+        'key_type'      => 0,
         'subject' => [
             'countryName'            => 'BD',
             'stateOrProvinceName'    => 'Rangpur',
@@ -102,6 +105,13 @@ return [
         'prefix'     => 'qz',
         'middleware' => ['web'],
         'throttle'   => '60,1',
+        // API routes (routes/api.php) are disabled by default. Enable only
+        // when you need a stateless, sanctum-protected surface.
+        'api' => [
+            'enabled'    => env('QZ_API_ENABLED', false),
+            'prefix'     => 'api/qz',
+            'middleware' => ['auth:sanctum', 'throttle:60,1'],
+        ],
     ],
 
     /*

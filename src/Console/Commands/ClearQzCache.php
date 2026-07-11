@@ -13,7 +13,7 @@ class ClearQzCache extends Command
 
     protected $description = 'Clear QZ Tray cache';
 
-    public function handle()
+    public function handle(): int
     {
         $this->info('🧹 Clearing QZ Tray cache...');
 
@@ -39,6 +39,6 @@ class ClearQzCache extends Command
 
         $this->info('✅ Cache cleared successfully!');
 
-        return 0;
+        return self::SUCCESS;
     }
 }

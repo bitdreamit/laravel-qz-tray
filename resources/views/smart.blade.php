@@ -236,6 +236,18 @@ function setConnState(state) {
 }
 
 // ── Printer list UI ──────────────────────────────────────
+// Escape HTML special characters to prevent XSS when printer names
+// contain <, >, &, ", or '. Printer names come from the OS and could
+// theoretically be crafted.
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function renderPrinters(printers) {
     var ul  = document.getElementById('printer-list');
     var cur = SmartPrint.getCurrentPrinter();
@@ -247,9 +259,22 @@ function renderPrinters(printers) {
     printers.forEach(function(p) {
         var li = document.createElement('li');
         if (p === cur) li.classList.add('active-printer');
-        li.innerHTML = '<span>' + p + '</span>' +
-            '<button class="btn btn-sm btn-primary" style="padding:4px 10px;font-size:.78rem;"' +
-            ' onclick="SmartPrint.setPrinter(\'' + p.replace(/'/g, "\\'") + '\');updateCurrentPrinterInput();">Use</button>';
+        // Build the Use button via DOM API so the printer name is safely
+        // passed through the data attribute instead of string-interpolated
+        // into an onclick handler (which would be an XSS sink).
+        var span = document.createElement('span');
+        span.textContent = p; // textContent is safe — no HTML parsing
+        li.appendChild(span);
+        var btn = document.createElement('button');
+        btn.className = 'btn btn-sm btn-primary';
+        btn.style.cssText = 'padding:4px 10px;font-size:.78rem;';
+        btn.textContent = 'Use';
+        btn.dataset.printer = p;
+        btn.addEventListener('click', function() {
+            SmartPrint.setPrinter(this.dataset.printer);
+            updateCurrentPrinterInput();
+        });
+        li.appendChild(btn);
         ul.appendChild(li);
     });
 }
