@@ -288,3 +288,108 @@ These are design observations, not bugs:
 5. **The `setPrinter`, `clearCache`, and `print` POST endpoints** require a CSRF token (via `web` middleware), but `smart-print.js` never calls them — it uses `localStorage` for printer memory instead. Either wire the JS to use the server-side endpoints, or document them as optional/backend-only.
 6. **The `default.blade.php` (3464 lines)** is the full QZ Tray demo page and loads jQuery 1.11.3 (from 2015, has known XSS vulnerabilities). Consider updating or removing it.
 7. **`example.blade.php`** references `route('receipts.show', ['id' => 456])` which will throw `RouteNotFoundException` on apps that don't define that route. Guard with `@if(Route::has('receipts.show'))` or remove.
+
+---
+
+# Addendum — v1.1.0 Audit (2026-07-22)
+
+**Trigger:** requested UUID device identity, multi-user/single-user/direct/queue print-mode review, and a QZ Tray library version check.
+**Files reviewed:** all files from the 2026-07-12 audit, re-checked after the fixes below were applied.
+**Result:** 1 critical cross-user data leak, 3 high-severity dead/broken-contract bugs, 1 outdated pinned dependency.
+
+| Severity | Count | Categories |
+|----------|-------|------------|
+| Critical | 1 | Cross-user/cross-workstation data leak |
+| High | 3 | Broken public API contract, unreachable queue endpoints, orphaned promise |
+| Low | 1 | Outdated pinned dependency |
+
+## BUG-19 — Server-side printer memory leaked across users/workstations (Critical)
+
+**File:** `src/Http/Controllers/QzSecurityController.php`
+**Functions:** `setPrinter()`, `getPrinter()`
+
+**Problem:** `setPrinter()` wrote the chosen printer to `Cache::put('qz.printer.' . $path, ...)` — a single, **identity-less** key shared by every visitor to that URL — as a fallback beneath the per-session value. `getPrinter()` read `session() ?? Cache::get(...) ?? default`. Recommendation #5 in the original audit noted `smart-print.js` never called these endpoints (it used `localStorage` only), so this was dormant in the stock JS flow — but the routes are documented as a public API, and this package's target use case (multiple shared lab/kiosk workstations printing through the same central web app) is exactly the scenario where a developer would reach for server-side printer memory instead of per-browser `localStorage`. Concretely: Workstation A sets "Label Printer" for `/orders/5`. Workstation B — different PC, different physical printer, first-ever visit to that path, no session value yet — would silently be handed A's printer as its own.
+
+**Fix:**
+- New `qz_printer_preferences` table (migration `2026_07_22_000000_create_qz_printer_preferences_table.php`), unique on `(identity_type, identity_value, path)`.
+- `resolveIdentities()` computes every identity present on the request: `device` (from an `X-Device-Id: <uuid>` header/param), `user` (authenticated user id), `session` (Laravel session id) — never falls through to an identity-less key.
+- `setPrinter()` writes one row per identity present on the request, so the preference is correctly retrievable however many identities apply.
+- `getPrinter()` reads in the order defined by the new `qz-tray.identity_priority` config (default `device → user → session`), returning `config('qz-tray.default_printer')` only when **no** identity has a stored row for that path — never another identity's value.
+- `clearCache()` now deletes the requester's own preference rows (by identity) plus best-effort cleanup of any pre-1.1 Cache/session keys.
+
+---
+
+## BUG-20 — `SmartPrint.print()` never returned the job promise (High / Broken API contract)
+
+**File:** `resources/js/smart-print.js`
+**Function:** public `print()`
+
+**Problem:** The README's "Programmatic API Usage" section documents `const jobId = await SmartPrint.print(url, options);` and `onComplete`/`onError` callbacks in the options object. Neither worked: `enqueue()` returned nothing (undefined), and `print()`'s branches called `enqueue(job)` without a `return`, so the promise chain was severed twice over. `onComplete`/`onError` were never invoked anywhere in the file.
+
+**Fix:**
+- `enqueue()` now creates a `Promise` per job (idempotently — see BUG-22), stores `_resolve`/`_reject` on the job object, and returns it.
+- `print()`, `printRaw()`, `printZPL()`, `printESC()` all `return enqueue(...)`.
+- `printQZ()` settles the promise and invokes `job.onComplete(job)` / `job.onError(err, job)` on every terminal branch (success, each validation failure, unknown type via fallback, and the `qz.print()` catch block).
+- Job IDs are real UUIDs (`crypto.randomUUID()`, with a template-based fallback for older embedded browsers) generated once per job and echoed back in the resolved value: `{ jobId, success }`.
+
+---
+
+## BUG-21 — `GET /qz/jobs` and `DELETE /qz/jobs/{id}` were hardcoded stubs (High)
+
+**File:** `src/Http/Controllers/QzSecurityController.php`
+**Functions:** `jobs()`, `cancelJob()`
+
+**Problem:** `jobs()` always returned `{ jobs: [] }` and `cancelJob($id)` always returned `{ success: true }` regardless of whether `$id` existed — neither queried `qz_print_jobs`. Combined with BUG-05's fix (which did start writing rows) and the fact that `print()` minted its own `uniqid()` server-side that no client code ever received, the queue-management endpoints were structurally unreachable: nothing on the client ever had a job id to cancel, and the "list" endpoint couldn't have shown anything real even if it queried the table.
+
+**Fix:**
+- `print()` now accepts an optional client-supplied `job_id` (validated as `uuid`) and uses it as the row's `uuid` if present, falling back to a server-generated `Str::uuid()` for direct API callers. `smart-print.js` sends its client-generated job id here via a new `logPrintJob()` call after each successful `qz.print()`, so the id returned to `await SmartPrint.print()` is the same id that identifies the row.
+- `jobs()` now queries `qz_print_jobs` for `pending`/`processing` rows, scoped to the requester's `user_id`+`user_type` if authenticated, else their `X-Device-Id` — so one workstation's queue view can't show another's jobs.
+- `cancelJob($id)` looks up the row by `uuid`, returns 404 if not found, 409 if already in a terminal state, and otherwise sets `status = 'cancelled'`.
+- Migration adds `uuid` (unique) and `device_id` columns to `qz_print_jobs`, plus a `(device_id, status)` index for the queue lookup above.
+
+---
+
+## BUG-22 — Printer-selection modal orphaned the original job's promise (High)
+
+**File:** `resources/js/smart-print.js`
+**Function:** `openPrinterModal()`
+
+**Problem:** When `printQZ()` had no printer selected, it opened the modal and returned (with BUG-20's fix, leaving the job's promise pending). The modal's button handler then called `enqueue({ ...jobToQueue, printer })` — spreading the job into a **new object** with a **new** `_resolve`/`_reject` pair once BUG-20 introduced them. Any caller doing `await SmartPrint.print(...)` before a printer had ever been chosen would hang forever: the promise it was holding was never the one that actually got printed.
+
+**Fix:** `enqueue()` is idempotent on an object that already carries a `_promise` — it just re-pushes the same job onto the queue rather than minting a second promise. The modal now mutates `jobToQueue.printer` and re-enqueues the same reference. Cancelling the modal (button or backdrop click) now rejects the pending promise with `"Print cancelled: no printer selected"` instead of leaving it pending indefinitely.
+
+---
+
+## BUG-23 — Pinned QZ Tray client library was one release behind (Low)
+
+**Files:** `README.md`, `src/Console/Commands/InstallQzTray.php`, `resources/views/smart.blade.php`
+
+**Problem:** All three shipped `<script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.5/qz-tray.min.js">`. Upstream (`qzind/tray`) released `2.2.6` in April 2026: race-condition fix in the websocket connection, better locking/concurrency for hardware I/O (serial/network/files/USB), and a Windows SYSTEM-user install fix.
+
+**Fix:** Bumped the pinned CDN version to `2.2.6` in all three files. No package code changes required — this is a client-library version only, and 2.2.x is API-compatible per QZ Tray's own versioning.
+
+---
+
+## Files Changed (v1.1.0)
+
+| File | Bugs Fixed |
+|------|-----------|
+| `src/Http/Controllers/QzSecurityController.php` | BUG-19, BUG-21 |
+| `config/qz-tray.php` | BUG-19 |
+| `database/migrations/2026_01_01_000000_create_qz_print_jobs_table.php` | BUG-21 |
+| `database/migrations/2026_07_22_000000_create_qz_printer_preferences_table.php` (new) | BUG-19 |
+| `resources/js/smart-print.js` | BUG-19, BUG-20, BUG-21, BUG-22 |
+| `README.md`, `src/Console/Commands/InstallQzTray.php`, `resources/views/smart.blade.php` | BUG-23 |
+
+## New Migration Required
+
+```bash
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-migrations --force
+php artisan migrate
+```
+
+## Recommendations (not fixed)
+
+1. **`printer-switcher.js`/`printer-status.js`** still only read `SmartPrint.getCurrentPrinter()`/localStorage — consider surfacing `getDeviceId()` in the status widget for on-screen confirmation of which workstation identity is active (useful for lab-PC troubleshooting).
+2. **`identity_priority` = `device` first** is the right default for shared/kiosk workstations (your Mirth Connect PC → multi-analyzer topology) but wrong for apps where a person's printer choice should follow them between machines — flip the config to `['user', 'device', 'session']` for that case.
+3. **`qz_printer_preferences` rows are never pruned.** `printer_cache_duration` config still exists but nothing acts on it now that Cache TTL isn't the storage mechanism. Consider a scheduled command (`qz:prune-preferences --older-than=90`) if this matters for your retention policy.

@@ -6,6 +6,47 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.1.0] — 2026-07-22
+
+> UUID device identity, multi-workstation printer-memory correctness, and queue management wired end-to-end. See `BUG_REPORT.md` addendum for full detail (BUG-19 to BUG-23).
+
+### 🐛 Bug Fixes
+
+- **CRITICAL** — Fixed server-side printer memory (`/qz/printer`) leaking across users/workstations. It previously fell back to a single identity-less `Cache` key per URL path, so one workstation's printer choice could silently become another's default. Replaced with a `qz_printer_preferences` table scoped to `(identity_type, identity_value, path)`.
+- **HIGH** — Fixed `SmartPrint.print()` (and `printRaw`/`printZPL`/`printESC`) never returning the underlying job promise — `await SmartPrint.print(...)`, documented in the README since v1.0.0, always resolved to `undefined`.
+- **HIGH** — Fixed `job.onComplete`/`job.onError` callbacks (documented in the "Options Object" section) never being invoked anywhere.
+- **HIGH** — Fixed `GET /qz/jobs` and `DELETE /qz/jobs/{id}` being hardcoded stubs that never queried the database, making the print-queue management endpoints unreachable in practice.
+- **HIGH** — Fixed the printer-selection modal orphaning a job's promise by re-enqueueing a cloned object instead of the original — a caller awaiting `SmartPrint.print()` before any printer was chosen would hang forever.
+- **LOW** — Bumped pinned QZ Tray client library from `2.2.5` to `2.2.6` (upstream fixed a websocket race condition and improved hardware I/O locking/concurrency).
+
+### ✨ New Features
+
+- **Device UUID identity** — `smart-print.js` generates and persists a UUID per browser/workstation (`localStorage`, `crypto.randomUUID()`), sent as `X-Device-Id` on every request. Exposed via `SmartPrint.getDeviceId()`.
+- **`qz-tray.identity_priority` config** — controls whether printer memory resolves by `device`, `user`, or `session` first when more than one applies to a request. Defaults to `device` first (correct for shared lab/kiosk workstations where the physical machine, not the logged-in user, determines the printer).
+- **Server-synced printer memory** — `smart-print.js` now optionally backs up/restores printer selection via the server (opt-out with `window.QZ_CONFIG.serverSync = false`), in addition to `localStorage`.
+- **Real, correlated job IDs** — print jobs use client-generated UUIDs that match the `uuid` column on `qz_print_jobs`, so `jobs()` and `cancelJob()` now operate on real, identity-scoped data instead of stubs.
+- **New migration** `2026_07_22_000000_create_qz_printer_preferences_table.php` — durable, identity-scoped printer memory storage.
+
+### 📦 Compatibility
+
+| | Version |
+|---|---|
+| PHP | 8.1, 8.2, 8.3 |
+| Laravel | 10.x, 11.x, 12.x |
+| QZ Tray | 2.2.6 |
+| ext-openssl | Required |
+
+### ⬆️ Upgrade Notes
+
+```bash
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-migrations --force
+php artisan migrate
+```
+
+No breaking changes to public JS/PHP API surfaces — all new behavior is additive or corrects a previously-broken documented contract.
+
+---
+
 ## [v1.0.0] — 2026-05-19 🎉 Current Stable Release
 
 > **Full rewrite and stabilisation pass.** Every known bug from v0.x has been fixed, the JavaScript library has been completely cleaned up, and full documentation is published.

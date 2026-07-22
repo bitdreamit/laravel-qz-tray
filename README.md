@@ -172,7 +172,7 @@ Add these two lines to your main Blade layout (e.g. `resources/views/layouts/app
     {{-- Your content here --}}
 
     {{-- Step 1: QZ Tray WebSocket library (CDN) --}}
-    <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.5/qz-tray.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js"></script>
 
     {{-- Step 2: SmartPrint library (published asset) --}}
     <script src="{{ asset('vendor/qz-tray/js/smart-print.js') }}"></script>
@@ -279,6 +279,13 @@ return [
     'allow_printer_switch'      => true,
     'remember_printer_per_page' => true,   // Remember per URL path
     'printer_cache_duration'    => 86400,  // seconds (24 hours)
+
+    // v1.1.0+: which identity wins when a request matches more than one
+    // (device UUID, authenticated user, session)? 'device' first is correct
+    // for shared/kiosk workstations where the physical machine — not who's
+    // logged in — determines the printer. Use ['user', 'device', 'session']
+    // if printer choice should follow a person between machines instead.
+    'identity_priority' => ['device', 'user', 'session'],
 
     // QZ Tray WebSocket connection
     'websocket' => [
@@ -451,13 +458,35 @@ All routes are prefixed with `/qz` by default (configurable).
 | `POST` | `/qz/printer` | `qz.printer.set` | Remember a printer for a URL path |
 | `GET` | `/qz/printer/{path}` | `qz.printer.get` | Get remembered printer for a URL path |
 
+**Device identity (v1.1.0+):** every request to `/qz/printer`, `/qz/print`, `/qz/jobs`, and `/qz/clear-cache` is scoped by whichever of these identities is present, in the order set by `qz-tray.identity_priority` (default `device → user → session`):
+
+- **`device`** — send an `X-Device-Id: <uuid>` header (or `device_id` body/query param). `SmartPrint.getDeviceId()` returns the UUID `smart-print.js` already generates and persists per browser/workstation — use the same value if you call these endpoints yourself.
+- **`user`** — the authenticated user (`auth()->user()`), when the route runs behind an auth middleware.
+- **`session`** — anonymous fallback, isolated per Laravel session.
+
+A request can match more than one identity at once (e.g. a logged-in user on a device-identified kiosk); `POST /qz/printer` writes a preference row for every identity present, so switching `identity_priority` later doesn't lose data. There is **no** unscoped, identity-less fallback — two different users/workstations can never read each other's stored printer.
+
+```js
+// smart-print.js already does this for you on every fetch; shown here for
+// direct API use (e.g. server-to-server or a custom admin dashboard):
+fetch('/qz/printer', {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-TOKEN': csrfToken,
+        'X-Device-Id':  SmartPrint.getDeviceId(),
+    },
+    body: JSON.stringify({ printer: 'Label Printer', path: '/orders/5' }),
+});
+```
+
 ### Print Jobs
 
 | Method | URL | Name | Description |
 |--------|-----|------|-------------|
 | `POST` | `/qz/print` | `qz.print` | Accept and log a print job |
-| `GET` | `/qz/jobs` | `qz.jobs` | List active print jobs |
-| `DELETE` | `/qz/jobs/{id}` | `qz.jobs.cancel` | Cancel a print job |
+| `GET` | `/qz/jobs` | `qz.jobs` | List **this workstation/user's** active print jobs (scoped, see above) |
+| `DELETE` | `/qz/jobs/{id}` | `qz.jobs.cancel` | Cancel a print job by its UUID |
 
 ### Cache & Setup
 
@@ -644,6 +673,34 @@ SmartPrint.setPrinter('HP LaserJet M404', 'global'); // Remember globally
 
 // Open the printer picker modal
 SmartPrint.showPrinterSwitcher();
+
+// Persistent UUID identifying THIS browser/workstation (v1.1.0+).
+// Generated once via crypto.randomUUID() and kept in localStorage.
+// Sent automatically as X-Device-Id on every /qz/* request; call it
+// directly if you're hitting those endpoints yourself (e.g. from an
+// admin dashboard) or want to display which workstation is active.
+const deviceId = SmartPrint.getDeviceId();
+// Returns: string (uuid)
+```
+
+#### Print Job Promises (v1.1.0+)
+
+`print()`, `printRaw()`, `printZPL()`, and `printESC()` all return a `Promise` that resolves once the job actually reaches the printer (or the browser fallback dialog), and rejects on failure — including if the user cancels the printer-selection modal. Prior releases documented this but it silently resolved to `undefined`; it now behaves as documented.
+
+```javascript
+try {
+    const { jobId, success } = await SmartPrint.print('/invoice.pdf', {
+        printer: 'Office Printer',
+        copies: 2,
+        onComplete: (job) => console.log('Printed', job.id),
+        onError:    (err, job) => console.error('Failed', job.id, err),
+    });
+    console.log('Job', jobId, success ? 'printed' : 'failed');
+} catch (err) {
+    // Rejects when: no printer available and the user cancelled the
+    // picker, QZ Tray was offline, or qz.print() itself threw.
+    console.error('Print failed:', err);
+}
 ```
 
 #### Connection

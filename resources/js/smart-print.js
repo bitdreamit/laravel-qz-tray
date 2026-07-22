@@ -10,7 +10,57 @@
 window.SmartPrint = (() => {
     const STORAGE_PREFIX = 'smart_printer:';
     const GLOBAL_KEY     = 'smart_printer_global';
+    const DEVICE_ID_KEY  = 'smart_print_device_id';
     let processingQueue  = false; // prevent concurrent processQueue calls
+
+    // ============================
+    // UUID helpers
+    // ============================
+    // Prefer crypto.randomUUID (all modern browsers). Fall back to a
+    // template-based uuid4 generator for older WebViews / embedded Trident
+    // browsers sometimes used on lab/kiosk workstations that don't expose it.
+    function uuid4() {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = (Math.random() * 16) | 0;
+            const v = c === 'x' ? r : (r & 0x3) | 0x8;
+            return v.toString(16);
+        });
+    }
+
+    // Persistent per-browser identifier for THIS workstation. Distinct from
+    // job ids: it never changes once generated, so the server can tell two
+    // different physical machines apart even when they share a Laravel
+    // session/login (e.g. multiple lab PCs logged in as the same clinic
+    // account). Used to scope server-side printer memory and print-job
+    // logging so one workstation's settings/queue never leak into another's.
+    function getDeviceId() {
+        try {
+            let id = localStorage.getItem(DEVICE_ID_KEY);
+            if (!id) {
+                id = uuid4();
+                localStorage.setItem(DEVICE_ID_KEY, id);
+            }
+            return id;
+        } catch (e) {
+            // localStorage unavailable (private browsing) — fall back to an
+            // in-memory id that's at least stable for this page session.
+            return state._volatileDeviceId || (state._volatileDeviceId = uuid4());
+        }
+    }
+
+    function csrfToken() {
+        return document.querySelector('meta[name="csrf-token"]')?.content ?? '';
+    }
+
+    // Server sync is opt-out via window.QZ_CONFIG.serverSync = false, for
+    // deployments that only ever want the localStorage-only behavior of
+    // pre-1.1 releases.
+    function serverSyncEnabled() {
+        return !(window.QZ_CONFIG && window.QZ_CONFIG.serverSync === false);
+    }
 
     const state = {
         qzReady:      false,
@@ -44,7 +94,10 @@ window.SmartPrint = (() => {
         if (!window.qz) return;
 
         qz.security.setCertificatePromise(resolve =>
-            fetch('/qz/certificate', { cache: 'no-store' })
+            fetch('/qz/certificate', {
+                cache: 'no-store',
+                headers: { 'X-Device-Id': getDeviceId() },
+            })
                 .then(r => {
                     if (!r.ok) throw new Error('Certificate fetch failed: ' + r.status);
                     return r.text();
@@ -60,7 +113,8 @@ window.SmartPrint = (() => {
                 cache:  'no-store',
                 headers: {
                     'Content-Type':  'application/json',
-                    'X-CSRF-TOKEN':  document.querySelector('meta[name="csrf-token"]')?.content ?? '',
+                    'X-CSRF-TOKEN':  csrfToken(),
+                    'X-Device-Id':   getDeviceId(),
                     'Accept':        'text/plain',
                 },
                 body: JSON.stringify({ data: toSign }),
@@ -139,15 +193,44 @@ window.SmartPrint = (() => {
     // Printer Memory
     // ============================
     function restorePrinter() {
+        let saved = null;
         try {
-            const saved = localStorage.getItem(STORAGE_PREFIX + pathKey())
-                       || localStorage.getItem(GLOBAL_KEY);
+            saved = localStorage.getItem(STORAGE_PREFIX + pathKey())
+                 || localStorage.getItem(GLOBAL_KEY);
             // Only restore if printer is in the current list (or list is empty = first connect)
             if (saved && (state.printers.length === 0 || state.printers.includes(saved))) {
                 state.currentPrinter = saved;
+            } else {
+                saved = null;
             }
         } catch (e) {
             // localStorage may be unavailable (private browsing, etc.)
+        }
+
+        // localStorage is per-browser, so it already isolates two different
+        // workstations from each other. The server round-trip below exists
+        // for the OTHER case: this same workstation's browser profile was
+        // reset/cleared, or a fresh browser is opened on the same physical
+        // device — server memory (scoped by the device UUID, which is
+        // regenerated only if localStorage itself is cleared) lets it pick
+        // its printer back up without asking again. It never overrides a
+        // value localStorage already had.
+        if (!saved && serverSyncEnabled()) {
+            fetch('/qz/printer/' + encodeURIComponent(pathKey()), {
+                headers: { 'X-Device-Id': getDeviceId() },
+                cache: 'no-store',
+            })
+                .then(r => r.ok ? r.json() : null)
+                .then(json => {
+                    const printer = json && json.printer;
+                    if (printer && !state.currentPrinter
+                        && (state.printers.length === 0 || state.printers.includes(printer))) {
+                        state.currentPrinter = printer;
+                        try { localStorage.setItem(STORAGE_PREFIX + pathKey(), printer); } catch (e) {}
+                        emit('printer-restored', { printer, source: json.scoped_to || 'default' });
+                    }
+                })
+                .catch(() => {}); // best-effort; localStorage/modal remain the source of truth
         }
     }
 
@@ -161,6 +244,20 @@ window.SmartPrint = (() => {
 
         if (state.channel) {
             state.channel.postMessage({ printer });
+        }
+
+        if (serverSyncEnabled()) {
+            fetch('/qz/printer', {
+                method: 'POST',
+                cache:  'no-store',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken(),
+                    'X-Device-Id':  getDeviceId(),
+                    'Accept':       'application/json',
+                },
+                body: JSON.stringify({ printer, path: pathKey(), device_id: getDeviceId() }),
+            }).catch(() => {}); // fire-and-forget; localStorage already has the authoritative copy
         }
 
         emit('printer-saved', { printer, scope });
@@ -177,11 +274,28 @@ window.SmartPrint = (() => {
     // ============================
     // Queue Management
     // ============================
+    // Idempotent: if `job` already carries a pending `_promise` (e.g. it is
+    // being re-submitted after the printer-selection modal was answered),
+    // that same promise is reused instead of creating a second, orphaned
+    // one — otherwise a caller doing `await SmartPrint.print(...)` before
+    // any printer had been chosen would hang forever, because the original
+    // promise would never be the one actually printed.
     function enqueue(job) {
+        if (!job._promise) {
+            job.id = job.id || uuid4();
+            job._promise = new Promise((resolve, reject) => {
+                job._resolve = resolve;
+                job._reject  = reject;
+            });
+            // Don't let an unawaited enqueue() (the common DOM-click path)
+            // produce an "Uncaught (in promise)" console error.
+            job._promise.catch(() => {});
+        }
         state.queue.push(job);
         updateQueueUI();
         emit('job-queued', { job });
         processQueue();
+        return job._promise;
     }
 
     async function processQueue() {
@@ -211,11 +325,18 @@ window.SmartPrint = (() => {
     function offlineBuffer(job) {
         state.failedQueue.push(job);
         try {
+            // Strip function/promise fields — JSON.stringify silently drops
+            // functions anyway, but being explicit avoids surprises if a
+            // future job field holds a class instance with a toJSON trap.
+            const { _resolve, _reject, _promise, ...serializable } = job;
             const offline = JSON.parse(localStorage.getItem('sp_offline_queue') || '[]');
-            offline.push(job);
+            offline.push(serializable);
             localStorage.setItem('sp_offline_queue', JSON.stringify(offline));
         } catch (e) {}
         emit('job-failed', { job });
+        // The original caller (if any) gets a clear rejection now rather
+        // than hanging until an eventual retry succeeds minutes/hours later.
+        job._reject && job._reject(new Error('QZ Tray offline; job stored for retry'));
         console.warn('[SmartPrint] QZ Tray offline – job stored for retry.');
     }
 
@@ -230,12 +351,53 @@ window.SmartPrint = (() => {
     }
 
     // ============================
+    // Server-side job logging (best-effort, non-blocking)
+    // ============================
+    // Sends the SAME client-generated job.id as `job_id` so the row created
+    // here is the one GET /qz/jobs and DELETE /qz/jobs/{id} can look up —
+    // previously the server minted its own uniqid() that no client code
+    // ever saw, so the queue/cancel endpoints were unreachable from the UI.
+    function logPrintJob(job, printer, status) {
+        if (!serverSyncEnabled()) return;
+        fetch('/qz/print', {
+            method: 'POST',
+            cache:  'no-store',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-TOKEN': csrfToken(),
+                'X-Device-Id':  getDeviceId(),
+                'Accept':       'application/json',
+            },
+            body: JSON.stringify({
+                job_id:    job.id,
+                printer,
+                type:      job.type,
+                url:       job.url || undefined,
+                data:      job.url ? undefined : (job.data || undefined),
+                copies:    job.copies,
+                device_id: getDeviceId(),
+                metadata:  { status: status || 'completed' },
+            }),
+        }).catch(() => {}); // logging failure must never block/alter the print result
+    }
+
+    // Invokes job.onComplete/job.onError if the caller supplied one via the
+    // options object (documented in the README's "Options Object" section,
+    // but never actually called anywhere before 1.1).
+    function safeCallback(fn, ...args) {
+        if (typeof fn !== 'function') return;
+        try { fn(...args); } catch (e) { console.error('[SmartPrint] job callback error', e); }
+    }
+
+    // ============================
     // Core print function
     // ============================
     async function printQZ(job) {
         const printer = job.printer || state.currentPrinter;
 
         if (!printer) {
+            // Promise stays pending — resolved/rejected once the user
+            // answers the printer-selection modal (see openPrinterModal).
             openPrinterModal(job);
             return;
         }
@@ -264,16 +426,22 @@ window.SmartPrint = (() => {
         switch (job.type) {
             case 'pdf':
                 if (!job.url) {
+                    const err = new Error('Missing PDF url');
                     console.error('[SmartPrint] PDF print requires a url.');
-                    emit('job-failed', { job, error: new Error('Missing PDF url') });
+                    emit('job-failed', { job, error: err });
+                    safeCallback(job.onError, err, job);
+                    job._reject && job._reject(err);
                     return;
                 }
                 payload = [{ type: 'pdf', data: job.url }];
                 break;
             case 'html':
                 if (!job.data && !job.url) {
+                    const err = new Error('Missing HTML data');
                     console.error('[SmartPrint] HTML print requires data or url.');
-                    emit('job-failed', { job, error: new Error('Missing HTML data') });
+                    emit('job-failed', { job, error: err });
+                    safeCallback(job.onError, err, job);
+                    job._reject && job._reject(err);
                     return;
                 }
                 payload = [{ type: 'html', data: job.data || job.url }];
@@ -282,24 +450,38 @@ window.SmartPrint = (() => {
             case 'raw':
             case 'escpos':
                 if (!job.data) {
+                    const err = new Error('Missing raw data for ' + job.type + ' print');
                     console.error('[SmartPrint] ' + job.type + ' print requires data.');
-                    emit('job-failed', { job, error: new Error('Missing raw data') });
+                    emit('job-failed', { job, error: err });
+                    safeCallback(job.onError, err, job);
+                    job._reject && job._reject(err);
                     return;
                 }
                 payload = [{ type: 'raw', format: 'command', data: job.data }];
                 break;
             default:
+                // Unrecognised type: the browser print dialog is the best
+                // we can do, so treat it as a (non-silent) success rather
+                // than leaving the promise unsettled.
                 fallback(job);
+                emit('job-completed', { job, fallback: true });
+                safeCallback(job.onComplete, job);
+                job._resolve && job._resolve({ jobId: job.id, success: true, fallback: true });
                 return;
         }
 
         try {
             await qz.print(cfg, payload);
             emit('job-completed', { job });
+            logPrintJob(job, printer, 'completed');
+            safeCallback(job.onComplete, job);
+            job._resolve && job._resolve({ jobId: job.id, success: true });
         } catch (err) {
             console.error('[SmartPrint] Print error:', err);
             emit('job-failed', { job, error: err });
+            safeCallback(job.onError, err, job);
             fallback(job);
+            job._reject && job._reject(err);
         }
     }
 
@@ -368,15 +550,28 @@ window.SmartPrint = (() => {
                 rememberPrinter(printer);
                 modal.remove();
                 if (jobToQueue && (jobToQueue.url || jobToQueue.data)) {
-                    enqueue({ ...jobToQueue, printer });
+                    // Mutate + re-enqueue the SAME job object rather than
+                    // spreading it into a new one. enqueue() is idempotent
+                    // on an object that already has `_promise`, so this
+                    // resolves/rejects the original promise a caller may be
+                    // awaiting instead of orphaning it behind a clone.
+                    jobToQueue.printer = printer;
+                    enqueue(jobToQueue);
                 }
             };
         });
 
-        modal.querySelector('#sp-modal-cancel').onclick = () => modal.remove();
+        const abandon = () => {
+            modal.remove();
+            if (jobToQueue && jobToQueue._reject) {
+                jobToQueue._reject(new Error('Print cancelled: no printer selected'));
+            }
+        };
+
+        modal.querySelector('#sp-modal-cancel').onclick = abandon;
 
         // Close on backdrop click
-        modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+        modal.addEventListener('click', e => { if (e.target === modal) abandon(); });
     }
 
     // ============================
@@ -511,13 +706,12 @@ window.SmartPrint = (() => {
         init,
         print: (urlOrOptions, options) => {
             if (typeof urlOrOptions === 'string') {
-                enqueue({ url: urlOrOptions, type: 'pdf', copies: 1, ...options });
-            } else {
-                // Normalise copies to an integer so downstream code can rely on it.
-                const job = { ...urlOrOptions };
-                if (job.copies !== undefined) job.copies = parseInt(job.copies, 10) || 1;
-                enqueue(job);
+                return enqueue({ url: urlOrOptions, type: 'pdf', copies: 1, ...options });
             }
+            // Normalise copies to an integer so downstream code can rely on it.
+            const job = { ...urlOrOptions };
+            if (job.copies !== undefined) job.copies = parseInt(job.copies, 10) || 1;
+            return enqueue(job);
         },
         printRaw: (data, type, printer) => enqueue({ data, type: type || 'raw', printer, copies: 1 }),
         printZPL: (zpl, printer)   => enqueue({ data: zpl,   type: 'zpl',    printer, copies: 1 }),
@@ -528,6 +722,9 @@ window.SmartPrint = (() => {
         getPrinters:         async () => { await connectQZ(); return state.printers; },
         getCurrentPrinter:   () => state.currentPrinter,
         showPrinterSwitcher: () => openPrinterModal(null),
+
+        // Device identity (UUID persisted per-browser/workstation)
+        getDeviceId,
 
         // Connection
         connect:     connectQZ,

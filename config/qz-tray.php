@@ -63,6 +63,30 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Printer Memory Identity Priority
+    |--------------------------------------------------------------------------
+    | When resolving which stored printer to use for a path, the request may
+    | match more than one identity (a logged-in user AND a device UUID AND a
+    | session). This defines which one wins, checked in order:
+    |
+    |   'device'  - the workstation/browser (X-Device-Id header). Use this
+    |               first for shared kiosks/lab PCs where the physical
+    |               machine — not who is logged in — determines the printer
+    |               (e.g. a lab PC always prints to its attached label
+    |               printer regardless of which technician is logged in).
+    |   'user'    - the authenticated user. Put this first for apps where a
+    |               person's printer choice should follow them between
+    |               machines.
+    |   'session' - anonymous fallback, isolated per browser session.
+    |
+    | Every identity present on a request is still written on setPrinter(),
+    | so changing this order later does not lose any previously saved
+    | preference.
+    */
+    'identity_priority' => ['device', 'user', 'session'],
+
+    /*
+    |--------------------------------------------------------------------------
     | WebSocket Settings
     |--------------------------------------------------------------------------
     | Default port is 8181 (QZ Tray default).

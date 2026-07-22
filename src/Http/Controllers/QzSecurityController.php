@@ -110,68 +110,138 @@ class QzSecurityController extends Controller
         ]);
     }
 
+    /**
+     * Resolve every identity applicable to the current request, in the
+     * order defined by `qz-tray.identity_priority` (default: device, user,
+     * session). A request can legitimately match more than one identity —
+     * e.g. a logged-in user on a lab workstation that also sends a device
+     * UUID — in which case `setPrinter` writes a row for every identity
+     * present (so it stays correct however priority is configured), and
+     * `getPrinter` reads the first configured priority that has a stored
+     * row.
+     *
+     * IMPORTANT: unlike the old implementation, there is no global,
+     * identity-less fallback key. A path with no matching identity row
+     * always falls through to `config('qz-tray.default_printer')`, never
+     * to some other user's/device's last selection.
+     */
+    private function resolveIdentities(Request $request): array
+    {
+        $identities = [];
+
+        $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
+        if ($deviceId && preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $deviceId)) {
+            $identities['device'] = $deviceId;
+        }
+
+        $user = $request->user();
+        if ($user) {
+            $identities['user'] = (string) $user->getAuthIdentifier();
+        }
+
+        // Session is always available under the `web` middleware and acts
+        // as the final, still-isolated fallback for anonymous requests that
+        // didn't send a device UUID (e.g. an older client build).
+        if ($request->hasSession()) {
+            $identities['session'] = $request->session()->getId();
+        }
+
+        return $identities;
+    }
+
     public function setPrinter(Request $request): \Illuminate\Http\JsonResponse
     {
         $validated = $request->validate([
-            'printer' => 'required|string|max:255',
-            'path'    => 'required|string|max:500',
+            'printer'   => 'required|string|max:255',
+            'path'      => 'required|string|max:500',
+            'device_id' => 'nullable|uuid',
         ]);
 
-        $safePath = preg_replace('/[^a-zA-Z0-9\-_\/]/', '_', $validated['path']);
-        $key = 'qz.printer.' . $safePath;
-        $ttl = config('qz-tray.printer_cache_duration', 86400);
+        $identities = $this->resolveIdentities($request);
 
-        Cache::put($key, $validated['printer'], $ttl);
-
-        // Track keys so qz:clear-cache can find all of them
-        $keys = Cache::get('qz.printer_keys', []);
-        if (! in_array($key, $keys)) {
-            $keys[] = $key;
-            Cache::put('qz.printer_keys', $keys, $ttl);
+        if (empty($identities)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No identity (user, device, or session) available to scope this preference to.',
+            ], 422);
         }
 
-        session()->put($key, $validated['printer']);
+        foreach ($identities as $type => $value) {
+            \DB::table('qz_printer_preferences')->updateOrInsert(
+                ['identity_type' => $type, 'identity_value' => $value, 'path' => $validated['path']],
+                ['printer_name' => $validated['printer'], 'updated_at' => now(), 'created_at' => now()]
+            );
+        }
 
         return response()->json([
-            'success' => true,
-            'printer' => $validated['printer'],
-            'path'    => $validated['path'],
+            'success'    => true,
+            'printer'    => $validated['printer'],
+            'path'       => $validated['path'],
+            'scoped_to'  => array_keys($identities),
         ]);
     }
 
-    public function getPrinter(string $path): \Illuminate\Http\JsonResponse
+    public function getPrinter(Request $request, string $path): \Illuminate\Http\JsonResponse
     {
-        $safePath = preg_replace('/[^a-zA-Z0-9\-_\/]/', '_', $path);
-        $key = 'qz.printer.' . $safePath;
+        $identities = $this->resolveIdentities($request);
+        $priority   = config('qz-tray.identity_priority', ['device', 'user', 'session']);
 
-        $printer = session()->get($key)
-            ?? Cache::get($key)
-            ?? config('qz-tray.default_printer');
+        $printer = null;
+        $matchedType = null;
+
+        foreach ($priority as $type) {
+            if (! isset($identities[$type])) {
+                continue;
+            }
+
+            $row = \DB::table('qz_printer_preferences')
+                ->where('identity_type', $type)
+                ->where('identity_value', $identities[$type])
+                ->where('path', $path)
+                ->first();
+
+            if ($row) {
+                $printer     = $row->printer_name;
+                $matchedType = $type;
+                break;
+            }
+        }
 
         return response()->json([
-            'success' => true,
-            'printer' => $printer,
-            'path'    => $path,
+            'success'    => true,
+            'printer'    => $printer ?? config('qz-tray.default_printer'),
+            'path'       => $path,
+            'scoped_to'  => $matchedType, // null when falling back to the global default
         ]);
     }
 
-    public function clearCache(): \Illuminate\Http\JsonResponse
+    public function clearCache(Request $request): \Illuminate\Http\JsonResponse
     {
+        $identities = $this->resolveIdentities($request);
+
+        $deleted = 0;
+        foreach ($identities as $type => $value) {
+            $deleted += \DB::table('qz_printer_preferences')
+                ->where('identity_type', $type)
+                ->where('identity_value', $value)
+                ->delete();
+        }
+
+        // Legacy Cache/session keys from pre-1.1 installs, cleaned up best-effort.
         foreach (session()->all() as $key => $value) {
             if (str_starts_with($key, 'qz.printer.')) {
                 session()->forget($key);
             }
         }
-
-        $keys = Cache::get('qz.printer_keys', []);
-        foreach ($keys as $key) {
+        $legacyKeys = Cache::get('qz.printer_keys', []);
+        foreach ($legacyKeys as $key) {
             Cache::forget($key);
         }
         Cache::forget('qz.printer_keys');
 
         return response()->json([
             'success'   => true,
-            'message'   => 'Printer cache cleared',
+            'message'   => "Printer cache cleared ({$deleted} preference rows removed)",
             'timestamp' => now()->toIso8601String(),
         ]);
     }
@@ -194,11 +264,20 @@ class QzSecurityController extends Controller
             'url'        => 'required_without:data|nullable|string|max:2048',
             'copies'     => 'nullable|integer|min:1|max:999',
             'document'   => 'nullable|string|max:255',
+            'device_id'  => 'nullable|uuid',
             'metadata'   => 'nullable|array',
         ]);
 
-        $jobId = uniqid('qz_', true);
+        // uniqid('qz_', true) is time-based (microseconds + a per-process
+        // counter). Under concurrent print requests from several
+        // workstations hitting the same web worker in the same
+        // microsecond window it is not guaranteed unique, and it is not a
+        // valid `uuid` column value for the migration below. Str::uuid()
+        // (uuid4, backed by ramsey/uuid which Laravel already requires)
+        // is collision-safe and matches the `uuid` column type.
+        $jobId = (string) \Illuminate\Support\Str::uuid();
         $type  = $request->input('type');
+        $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
 
         // Persist to database when the qz_print_jobs table exists.
         // This makes the migration that ships with the package actually useful.
@@ -207,9 +286,11 @@ class QzSecurityController extends Controller
             try {
                 $user = $request->user();
                 \DB::table('qz_print_jobs')->insert([
+                    'uuid'          => $jobId,
                     'tenant_id'     => null,
                     'user_id'       => $user?->getAuthIdentifier(),
                     'user_type'     => $user ? get_class($user) : null,
+                    'device_id'     => $deviceId,
                     'printer_name'  => $request->input('printer'),
                     'document_url'  => $request->input('url', ''),
                     'document_type' => $type,
@@ -246,17 +327,57 @@ class QzSecurityController extends Controller
         ]);
     }
 
-    public function jobs(): \Illuminate\Http\JsonResponse
+    public function jobs(Request $request): \Illuminate\Http\JsonResponse
     {
-        return response()->json([
-            'success' => true,
-            'jobs'    => [],
-            'message' => 'No active print jobs',
-        ]);
+        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+            return response()->json(['success' => true, 'jobs' => [], 'message' => 'qz_print_jobs table not migrated']);
+        }
+
+        $query = \DB::table('qz_print_jobs')
+            ->whereIn('status', ['pending', 'processing'])
+            ->orderBy('created_at');
+
+        // Scope the queue to the requesting identity so PC-1's queue view
+        // never shows PC-2's jobs (or vice versa) when several workstations
+        // share the same Laravel session/auth guard.
+        $user     = $request->user();
+        $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
+        if ($user) {
+            $query->where('user_id', (string) $user->getAuthIdentifier())->where('user_type', get_class($user));
+        } elseif ($deviceId) {
+            $query->where('device_id', $deviceId);
+        }
+
+        $jobs = $query->limit(100)->get(['uuid', 'printer_name', 'document_type', 'status', 'copies', 'created_at']);
+
+        return response()->json(['success' => true, 'jobs' => $jobs]);
     }
 
-    public function cancelJob($id): \Illuminate\Http\JsonResponse
+    public function cancelJob(Request $request, string $id): \Illuminate\Http\JsonResponse
     {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+            return response()->json(['success' => false, 'message' => 'qz_print_jobs table not migrated'], 404);
+        }
+
+        $job = \DB::table('qz_print_jobs')->where('uuid', $id)->first();
+
+        if (! $job) {
+            return response()->json(['success' => false, 'message' => "Print job {$id} not found"], 404);
+        }
+
+        if (! in_array($job->status, ['pending', 'processing'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => "Print job {$id} is already {$job->status} and cannot be cancelled",
+            ], 409);
+        }
+
+        \DB::table('qz_print_jobs')->where('uuid', $id)->update([
+            'status'       => 'cancelled',
+            'processed_at' => now(),
+            'updated_at'   => now(),
+        ]);
+
         return response()->json([
             'success' => true,
             'message' => "Print job {$id} cancelled",
