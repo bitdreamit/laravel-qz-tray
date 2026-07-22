@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * @version 2.2.5
+ * @version 2.2.6
  * @overview QZ Tray Connector
  * @license LGPL-2.1-only
  * <p/>
@@ -24,10 +24,36 @@ var qz = (function() {
         };
     }
 
+    if (!Array.from) {
+        Array.from = function(object) {
+            return [].slice.call(object);
+        };
+    }
+
+    if (!String.prototype.padStart) {
+        String.prototype.padStart = function padStart(targetLength, padString) {
+            targetLength = targetLength >> 0; // truncate if number or convert non-number to 0
+            padString = String(typeof padString !== 'undefined' ? padString : ' ');
+
+            if (this.length >= targetLength) {
+                return String(this);
+            }
+
+            var gapSize = targetLength - this.length;
+            var padding = "";
+            while (padding.length < gapSize) {
+                padding += padString;
+            }
+
+            return padding.slice(0, gapSize) + String(this);
+        };
+    }
+
 ///// PRIVATE METHODS /////
 
     var _qz = {
-        VERSION: "2.2.5",                              //must match @version above
+        TITLE: "QZ Tray",
+        VERSION: "2.2.6",                              //must match @version above
         DEBUG: false,
 
         log: {
@@ -61,6 +87,8 @@ var qz = (function() {
                 host: ["localhost", "localhost.qz.io"], //hosts QZ Tray can be running on
                 hostIndex: 0,                           //internal var - index on host array
                 usingSecure: true,                      //boolean use of secure protocol
+                usingSurf: true,                        //append suffix to non-qualified hostnames
+                surfDomain: "qz.surf",                  //surf suffix to append
                 protocol: {
                     secure: "wss://",                   //secure websocket
                     insecure: "ws://"                   //insecure websocket
@@ -76,6 +104,57 @@ var qz = (function() {
             },
 
             setup: {
+                webSocketPromise: function(address) {
+                    var ws, onError, onOpen;
+                    return _qz.tools.promise(function(resolve, reject) {
+                        ws = new _qz.tools.ws(address);
+                        _qz.websocket.connection = ws;
+                        onOpen = function() {
+                            resolve(ws);
+                        };
+                        onError = function(e) {
+                            _qz.websocket.connection = null;
+                            reject(e);
+                        };
+                        ws.addEventListener("open", onOpen);
+                        ws.addEventListener("error", onError);
+                        // Older Safari versions may trigger close event instead of error event.
+                        ws.addEventListener("close", onError);
+                    }).finally(function() {
+                        ws.removeEventListener("open", onOpen);
+                        ws.removeEventListener("error", onError);
+                        ws.removeEventListener("close", onError);
+                    });
+                },
+
+                connectToAddress: function(address) {
+                    var lna = _qz.tools.getLna();
+
+                    _qz.log.trace("Attempting connection", address);
+                    var wsPromise;
+                    if (lna) {
+                        _qz.log.trace("Connecting with lna.js");
+                        wsPromise = lna.detectLna(address, _qz.websocket.setup.webSocketPromise, {
+                            isWebSocket: true,
+                            defaultAddressSpace: 'public'
+                        });
+                    } else {
+                        _qz.log.trace("Connecting without lna.js");
+                        wsPromise = _qz.websocket.setup.webSocketPromise(address);
+                    }
+                    return wsPromise.catch(function(evt) {
+                        var msg = evt.denied
+                            ? "Connection attempt denied by Local Network Access restrictions"
+                            : "Unable to establish connection with " + _qz.TITLE;
+                        var err = new Error(msg);
+                        if (lna && evt instanceof lna.LnaError) {
+                            err.denied = evt.denied;
+                            err.permission = evt.permission;
+                        }
+                        throw err;
+                    });
+                },
+
                 /** Loop through possible ports to open connection, sets web socket calls that will settle the promise. */
                 findConnection: function(config, resolve, reject) {
                     if (_qz.websocket.shutdown) {
@@ -97,10 +176,16 @@ var qz = (function() {
                         config.usingSecure = true;
                     }
 
-                    var deeper = function() {
+                    var deeper = function(e) {
                         if (_qz.websocket.shutdown) {
                             //connection attempt was cancelled, bail out
                             reject(new Error("Connection attempt cancelled by user"));
+                            return;
+                        }
+
+                        if (e.denied) {
+                            //user denied LNA permission, stop trying
+                            reject(e);
                             return;
                         }
 
@@ -110,7 +195,7 @@ var qz = (function() {
                             || (!config.usingSecure && config.port.portIndex >= config.port.insecure.length)) {
                             if (config.hostIndex >= config.host.length - 1) {
                                 //give up, all hope is lost
-                                reject(new Error("Unable to establish connection with QZ"));
+                                reject(e);
                                 return;
                             } else {
                                 config.hostIndex++;
@@ -129,74 +214,44 @@ var qz = (function() {
                         address = config.protocol.insecure + config.host[config.hostIndex] + ":" + config.port.insecure[config.port.portIndex];
                     }
 
-                    try {
-                        _qz.log.trace("Attempting connection", address);
-                        _qz.websocket.connection = new _qz.tools.ws(address);
-                    }
-                    catch(err) {
-                        _qz.log.error(err);
-                        deeper();
-                        return;
-                    }
+                    var promise = _qz.websocket.setup.connectToAddress(address);
 
-                    if (_qz.websocket.connection != null) {
-                        _qz.websocket.connection.established = false;
-
+                    promise.then(
                         //called on successful connection to qz, begins setup of websocket calls and resolves connect promise after certificate is sent
-                        _qz.websocket.connection.onopen = function(evt) {
-                            if (!_qz.websocket.connection.established) {
-                                _qz.log.trace(evt);
-                                _qz.log.info("Established connection with QZ Tray on " + address);
+                        function() {
+                            _qz.log.info("Established connection with " + _qz.TITLE + " on " + address);
+                            _qz.websocket.setup.openConnection({ resolve: resolve, reject: reject });
 
-                                _qz.websocket.setup.openConnection({ resolve: resolve, reject: reject });
+                            if (config.keepAlive > 0) {
+                                var interval = setInterval(function() {
+                                    if (!_qz.tools.isActive() || _qz.websocket.connection.interval !== interval) {
+                                        clearInterval(interval);
+                                        return;
+                                    }
 
-                                if (config.keepAlive > 0) {
-                                    var interval = setInterval(function() {
-                                        if (!_qz.tools.isActive() || _qz.websocket.connection.interval !== interval) {
-                                            clearInterval(interval);
-                                            return;
-                                        }
+                                    _qz.websocket.connection.send("ping");
+                                }, config.keepAlive * 1000);
 
-                                        _qz.websocket.connection.send("ping");
-                                    }, config.keepAlive * 1000);
-
-                                    _qz.websocket.connection.interval = interval;
-                                }
+                                _qz.websocket.connection.interval = interval;
                             }
-                        };
-
-                        //called during websocket close during setup
-                        _qz.websocket.connection.onclose = function() {
-                            // Safari compatibility fix to raise error event
-                            if (_qz.websocket.connection && typeof navigator !== 'undefined' && navigator.userAgent.indexOf('Safari') != -1 && navigator.userAgent.indexOf('Chrome') == -1) {
-                                _qz.websocket.connection.onerror();
-                            }
-                        };
-
+                        },
                         //called for errors during setup (such as invalid ports), reject connect promise only if all ports have been tried
-                        _qz.websocket.connection.onerror = function(evt) {
-                            _qz.log.trace(evt);
-
-                            _qz.websocket.connection = null;
-
-                            deeper();
-                        };
-                    } else {
-                        reject(new Error("Unable to create a websocket connection"));
-                    }
+                        function(e) {
+                            _qz.log.trace(e);
+                            deeper(e);
+                        }
+                    )
                 },
 
                 /** Finish setting calls on successful connection, sets web socket calls that won't settle the promise. */
                 openConnection: function(openPromise) {
-                    _qz.websocket.connection.established = true;
-
                     //called when an open connection is closed
                     _qz.websocket.connection.onclose = function(evt) {
                         _qz.log.trace(evt);
 
                         _qz.websocket.connection = null;
                         _qz.websocket.callClose(evt);
-                        _qz.log.info("Closed connection with QZ Tray");
+                        _qz.log.info("Closed connection with " + _qz.TITLE);
 
                         for(var uid in _qz.websocket.pendingCalls) {
                             if (_qz.websocket.pendingCalls.hasOwnProperty(uid)) {
@@ -293,7 +348,7 @@ var qz = (function() {
                         if (returned.uid == null) {
                             if (returned.type == null) {
                                 //incorrect response format, likely connected to incompatible qz version
-                                _qz.websocket.connection.close(4003, "Connected to incompatible QZ Tray version");
+                                _qz.websocket.connection.close(4003, "Connected to incompatible " + _qz.TITLE + " version");
 
                             } else {
                                 //streams (callbacks only, no promises)
@@ -679,6 +734,51 @@ var qz = (function() {
             },
 
             ws: typeof WebSocket !== 'undefined' ? WebSocket : null,
+            lna: undefined,
+
+            getLna: function() {
+                if (_qz.tools.lna === undefined) {
+                    _qz.tools.lna = _qz.tools.loadLna() || null;
+                }
+                return _qz.tools.lna;
+            },
+
+            loadLna: function() {
+                if (typeof self === 'undefined') {
+                    // Not in a browser, no LNA restrictions apply
+                    return;
+                }
+                if (self.lna && self.lna.detectLna) {
+                    return self.lna;
+                }
+                // Use `require` if available so that bundlers can detect the dependency
+                if (typeof require === 'function') {
+                    try {
+                        return require('lna');
+                    } catch (e) {
+                        _qz.log.warn("Unable to load LNA library", e);
+                    }
+                }
+            },
+
+            /**
+             * Normalize a host string by appending a "surf"" tld if necessary.
+             * Ignored if "usingSurf" is set to false
+             */
+            appendSurf: function(host) {
+                return _qz.tools.isQualified(host) ? host : host + "." + _qz.websocket.connectConfig.surfDomain;
+            },
+
+            /**
+             * Returns if the provided hostname is fully-qualified either as a domain
+             * name or as an ip address. Used to determine whether to append a "surf" suffix
+             * (e.g. ".qz.surf") at the end.
+             */
+            isQualified: function(host) {
+                return (host.toLowerCase() === 'localhost') // essentially qualified
+                    || host.indexOf('.') !== -1 // ipv4
+                    || host.indexOf(':') !== -1; // ipv6
+            },
 
             absolute: function(loc) {
                 if (typeof window !== 'undefined' && typeof document.createElement === 'function') {
@@ -687,7 +787,7 @@ var qz = (function() {
                     return a.href;
                 } else if (typeof exports === 'object') {
                     //node.js
-                    require('path').resolve(loc);
+                    return require('path').resolve(loc);
                 }
                 return loc;
             },
@@ -765,17 +865,19 @@ var qz = (function() {
             versionCompare: function(major, minor, patch, build) {
                 if (_qz.tools.assertActive()) {
                     var semver = _qz.websocket.connection.semver;
-                    if (semver[0] != major) {
-                        return semver[0] - major;
-                    }
-                    if (minor != undefined && semver[1] != minor) {
-                        return semver[1] - minor;
-                    }
-                    if (patch != undefined && semver[2] != patch) {
-                        return semver[2] - patch;
-                    }
-                    if (build != undefined && semver.length > 3 && semver[3] != build) {
-                        return Number.isInteger(semver[3]) && Number.isInteger(build) ? semver[3] - build : semver[3].toString().localeCompare(build.toString());
+                    if(Array.isArray(semver)) {
+                        if (major != undefined && semver.length > 0 && semver[0] != major) {
+                            return semver[0] - major;
+                        }
+                        if (minor != undefined && semver.length > 1 && semver[1] != minor) {
+                            return semver[1] - minor;
+                        }
+                        if (patch != undefined && semver.length > 2 && semver[2] != patch) {
+                            return semver[2] - patch;
+                        }
+                        if (build != undefined && semver.length > 3 && semver[3] != build) {
+                            return Number.isInteger(semver[3]) && Number.isInteger(build) ? semver[3] - build : semver[3].toString().localeCompare(build.toString());
+                        }
                     }
                     return 0;
                 }
@@ -787,8 +889,7 @@ var qz = (function() {
 
             isActive: function() {
                 return !_qz.websocket.shutdown && _qz.websocket.connection != null
-                    && (_qz.websocket.connection.readyState === _qz.tools.ws.OPEN
-                        || _qz.websocket.connection.readyState === _qz.tools.ws.CONNECTING);
+                    && _qz.websocket.connection.readyState === _qz.tools.ws.OPEN;
             },
 
             assertActive: function() {
@@ -796,7 +897,7 @@ var qz = (function() {
                     return true;
                 }
                 // Promise won't reject on throw; yet better than 'undefined'
-                throw new Error("A connection to QZ has not been established yet");
+                throw new Error("A connection to " + _qz.TITLE + " has not been established yet");
             },
 
             uint8ArrayToHex: function(uint8) {
@@ -967,7 +1068,7 @@ var qz = (function() {
                 if (_qz.tools.isActive() && _qz.websocket.connection.semver) {
                     if (_qz.tools.isVersion(2, 0)) {
                         if (!quiet) {
-                            _qz.log.warn("Connected to an older version of QZ, alternate signature algorithms are not supported");
+                            _qz.log.warn("Connected to an older version of " + _qz.TITLE + ", alternate signature algorithms are not supported");
                         }
                         return false;
                     }
@@ -1195,7 +1296,7 @@ var qz = (function() {
                         const state = _qz.websocket.connection.readyState;
 
                         if (state === _qz.tools.ws.OPEN) {
-                            reject(new Error("An open connection with QZ Tray already exists"));
+                            reject(new Error("An open connection with " + _qz.TITLE + " already exists"));
                             return;
                         } else if (state === _qz.tools.ws.CONNECTING) {
                             reject(new Error("The current connection attempt has not returned yet"));
@@ -1229,6 +1330,12 @@ var qz = (function() {
                     //ensure any hosts are passed to internals as an array
                     if (typeof options.host !== 'undefined' && !Array.isArray(options.host)) {
                         options.host = [options.host];
+                        //append "surf" domain if enabled
+                        if(_qz.websocket.connectConfig.usingSurf) {
+                            for(var i = 0; i < options.host.length; i++) {
+                                options.host[i] = _qz.tools.appendSurf(options.host[i]);
+                            }
+                        }
                     }
 
                     _qz.websocket.shutdown = false; //reset state for new connection attempt
@@ -1272,7 +1379,7 @@ var qz = (function() {
             disconnect: function() {
                 return _qz.tools.promise(function(resolve, reject) {
                     if (_qz.websocket.connection != null) {
-                        if (_qz.tools.isActive()) {
+                        if (_qz.tools.isActive() || _qz.websocket.connection.readyState === _qz.tools.ws.CONNECTING) {
                             // handles closing both 'connecting' and 'connected' states
                             _qz.websocket.shutdown = true;
                             _qz.websocket.connection.promise = { resolve: resolve, reject: reject };
@@ -1281,7 +1388,7 @@ var qz = (function() {
                             reject(new Error("Current connection is still closing"));
                         }
                     } else {
-                        reject(new Error("No open connection with QZ Tray"));
+                        reject(new Error("No open connection with " + _qz.TITLE));
                     }
                 });
             },
@@ -1308,6 +1415,33 @@ var qz = (function() {
              */
             setClosedCallbacks: function(calls) {
                 _qz.websocket.closedCallbacks = calls;
+            },
+
+            /**
+             * Whether to append the "surf" domain (e.g. "qz.surf") to the end of non-qualified hosts (except "localhost")
+             *
+             * @param {boolean} usingSurf=true Toggles automatic "surf" domain appending
+             * @since 2.2.6
+             *
+             * @memberof qz.websocket
+             */
+            setUsingSurf: function(usingSurf) {
+                _qz.websocket.connectConfig.usingSurf = usingSurf;
+            },
+
+            /**
+             * The domain to automagically append to non-qualified hosts, such as "qz.surf", or "example.com"
+             *
+             * @param {string} surfDomain="qz.surf" The domain to append to non-qualified hosts.
+             * @since 2.2.6
+             *
+             * @memberof qz.websocket
+             */
+            setSurfDomain: function(surfDomain) {
+                if (surfDomain.indexOf('.') === 0) {
+                    surfDomain = surfDomain.substring(1);
+                }
+                _qz.websocket.connectConfig.surfDomain = surfDomain;
             },
 
             /**
@@ -1521,6 +1655,7 @@ var qz = (function() {
              *  @param {Object} [options.size=null] Paper size.
              *   @param {number} [options.size.width=null] Page width.
              *   @param {number} [options.size.height=null] Page height.
+             *   @param {boolean} [options.size.custom=false] If the provided page size is not included in the driver.
              *  @param {string} [options.units='in'] Page units, applies to paper size, margins, and density. Valid value <code>[in | cm | mm]</code>
              *
              *  @param {boolean} [options.forceRaw=false] Print the specified raw data using direct method, skipping the driver.  Not yet supported on Windows.
@@ -1585,13 +1720,18 @@ var qz = (function() {
          *      For <code>[image]</code> formats, valid flavors are <code>[base64 | file*]</code>.<p/>
          *      For <code>[pdf]</code> formats, valid flavors are <code>[base64 | file*]</code>.
          *  @param {Object} [data.options]
-         *   @param {string} [data.options.language] Required with <code>[raw]</code> type + <code>[image]</code> format. Printer language.
-         *   @param {number} [data.options.x] Optional with <code>[raw]</code> type + <code>[image]</code> format. The X position of the image.
-         *   @param {number} [data.options.y] Optional with <code>[raw]</code> type + <code>[image]</code> format. The Y position of the image.
-         *   @param {string|number} [data.options.dotDensity] Optional with <code>[raw]</code> type + <code>[image]</code> format.
-         *   @param {number} [data.precision=128] Optional with <code>[raw]</code> type <code>[image]</code> format. Bit precision of the ribbons.
-         *   @param {boolean|string|Array<Array<number>>} [data.options.overlay=false] Optional with <code>[raw]</code> type <code>[image]</code> format.
+         *   @param {string} [data.options.language] Required with <code>[raw]</code> type + <code>[html|image|pdf]</code> format. Printer language.
+         *   @param {string} [data.options.quantization="alpha"] Optional with <code>[raw]</code> type + <code>[html|image|pdf]</code> format. The "black pixel" quantization method used.  Valid values are <code>[alpha* | black | luma | dither]</code>.
+         *   @param {number} [data.options.threshold=127] Optional with <code>[raw]</code> type + <code>[html|image|pdf]</code> format. The "black pixel" threshold used for quantization.  Default is <code>127</code>.
+         *   @param {number} [data.options.x=0] Optional with <code>[raw]</code> type + <code>[html|image|pdf]</code> format for language(s) <code>[cpcl|epl]</code>. The X position of the image.
+         *   @param {number} [data.options.y=0] Optional with <code>[raw]</code> type + <code>[html|image|pdf]</code> format for language(s) <code>[cpcl|epl]</code>. The Y position of the image.
+         *   @param {string|number} [data.options.dotDensity="single"] Optional with <code>[raw]</code> type + <code>[html|image|pdf]</code> format for language(s) <code>[escpos]</code>.  Valid values are <code>[single* | double | triple | single-legacy | double-legacy]</code> or the escpos "decimal" equivalent
+         *   @param {string} [data.options.imageEncoding="esc_asterisk"] Optional with <code>[raw]</code> type + <code>[html|image|pdf]</code> format for language(s) <code>[escpos]</code> and imageEncoding(s) <code>esc_asterisk</code>.  Valid values are <code>[esc_asterisk* | gs_l | gs_v_0]</code>.
+         *   @param {number} [data.options.precision=128] Optional with <code>[raw]</code> type <code>[html|image|pdf]</code> format for language(s) <code>[evolis]</code>. Bit precision of the ribbons.
+         *   @param {boolean|string|Array<Array<number>>} [data.options.overlay=false] Optional with <code>[raw]</code> type <code>[html|image|pdf]</code> format for language(s) <code>[evolis]</code>.  Instructions for printing the "clear" overlay ribbon.
          *       Boolean sets entire layer, string sets mask image, Array sets array of rectangles in format <code>[x1,y1,x2,y2]</code>.
+         *   @param {string} [data.options.logoId] Mandatory with <code>[raw]</code> type <code>[html|image|pdf]</code> format for language(s) <code>[pgl]</code>. Logo identifier to append for storing in the printer's memory.
+         *   @param {boolean} [data.options.igpDots=false] Optional with <code>[raw]</code> type <code>[html|image|pdf]</code> format for language(s) <code>[pgl]</code>. When set to <code>true</code> instructs printer to fallback to legacy 60x72 dpi when printing graphics
          *   @param {string} [data.options.xmlTag] Required with <code>[xml]</code> flavor. Tag name containing base64 formatted data.
          *   @param {number} [data.options.pageWidth] Optional with <code>[html | pdf]</code> formats. Width of the rendering.
          *       Defaults to paper width.
@@ -2291,7 +2431,7 @@ var qz = (function() {
                     if (typeof deviceInfo.data === 'object') {
                         if (deviceInfo.data.type.toUpperCase() !== "PLAIN"
                             || typeof deviceInfo.data.data !== "string") {
-                            return _qz.tools.reject(new Error("Data format is not supported with connected QZ Tray version " + _qz.websocket.connection.version));
+                            return _qz.tools.reject(new Error("Data format is not supported with connected "  + _qz.TITLE + " version " + _qz.websocket.connection.version));
                         }
 
                         deviceInfo.data = deviceInfo.data.data;
@@ -2744,6 +2884,18 @@ var qz = (function() {
                 return (_qz.DEBUG = show);
             },
 
+
+            /**
+             * Get internal branding title used by logs and exceptions (e.g "QZ Tray")
+             *
+             * @returns {string} Internal title used for logs and exceptions
+             *
+             * @memberof qz.api
+             */
+            getTitle: function() {
+                return _qz.TITLE;
+            },
+
             /**
              * Get version of connected QZ Tray application.
              *
@@ -2823,6 +2975,18 @@ var qz = (function() {
             },
 
             /**
+             * Change the internal branding of "QZ Tray" for logs and exceptions
+             * Must be called before any connection attempts are made to appear in messaging
+             *
+             * @param {string} title Internal name to be used in place of "QZ Tray" for logs and exceptions
+             *
+             * @memberof qz.api
+             */
+            setTitle: function(title) {
+                _qz.TITLE = title;
+            },
+
+            /**
              * Change the WebSocket handler.
              * Should be called before any initialization to avoid possible errors.
              *
@@ -2854,7 +3018,9 @@ var qz = (function() {
         define(qz);
     } else if (typeof exports === 'object') {
         module.exports = qz;
-    } else {
+    } else if (typeof window === 'object') {
         window.qz = qz;
+    } else {
+        self.qz = qz;
     }
 })();
