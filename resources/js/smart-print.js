@@ -192,6 +192,16 @@ window.SmartPrint = (() => {
     // ============================
     // Printer Memory
     // ============================
+    // Page-wide tenant/project default, set by the host app once
+    // (window.QZ_CONFIG.tenantId / .projectId) — same convention logPrintJob()
+    // already uses. Returns undefined when the app is single-tenant, in
+    // which case the server's resolveTenantId() falls back to its own
+    // tenant_id_resolver config (or null) — the client never needs to know
+    // which.
+    function pageTenantId() {
+        return window.QZ_CONFIG && (window.QZ_CONFIG.tenantId ?? window.QZ_CONFIG.projectId);
+    }
+
     function restorePrinter() {
         let saved = null;
         try {
@@ -216,7 +226,9 @@ window.SmartPrint = (() => {
         // its printer back up without asking again. It never overrides a
         // value localStorage already had.
         if (!saved && serverSyncEnabled()) {
-            fetch('/qz/printer/' + encodeURIComponent(pathKey()), {
+            const tenantId = pageTenantId();
+            const qs = tenantId ? ('?tenant_id=' + encodeURIComponent(tenantId)) : '';
+            fetch('/qz/printer/' + encodeURIComponent(pathKey()) + qs, {
                 headers: { 'X-Device-Id': getDeviceId() },
                 cache: 'no-store',
             })
@@ -247,6 +259,7 @@ window.SmartPrint = (() => {
         }
 
         if (serverSyncEnabled()) {
+            const tenantId = pageTenantId();
             fetch('/qz/printer', {
                 method: 'POST',
                 cache:  'no-store',
@@ -256,7 +269,12 @@ window.SmartPrint = (() => {
                     'X-Device-Id':  getDeviceId(),
                     'Accept':       'application/json',
                 },
-                body: JSON.stringify({ printer, path: pathKey(), device_id: getDeviceId() }),
+                body: JSON.stringify({
+                    printer,
+                    path:      pathKey(),
+                    device_id: getDeviceId(),
+                    tenant_id: tenantId !== undefined ? String(tenantId) : undefined,
+                }),
             }).catch(() => {}); // fire-and-forget; localStorage already has the authoritative copy
         }
 

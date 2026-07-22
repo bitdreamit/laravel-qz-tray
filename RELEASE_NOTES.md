@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.1.2] — 2026-07-22
+
+> Implements all four v1.1.0/v1.1.1 "Recommendations (not fixed)" items.
+
+### ✨ New Features / Fixes
+
+1. **Device id visibility** — `printer-status.js` gained an opt-in `showDeviceId` option (default `false`). When enabled, the status widget shows a short device UUID fragment with the full id on hover — for confirming which workstation identity a shared/kiosk PC is using without opening devtools.
+2. **`identity_priority` default left as-is** — this was already a one-line config change (`['user', 'device', 'session']` vs. the default `['device', 'user', 'session']`), not a bug; no code change needed, just a reminder it's there.
+3. **`qz:prune-preferences` command** — new artisan command (`--older-than=90`, `--type=`, `--dry-run`) to delete stale `qz_printer_preferences` rows, since the DB-backed printer memory introduced in v1.1.0 doesn't expire on its own the way the old Cache TTL did. Not scheduled automatically — wire it into your own scheduler if row growth matters for your install. Also fixed `qz:clear-cache`, which had not been updated for the v1.1.0 storage change and was still only clearing the no-longer-written-to Cache keys.
+4. **`qz_printer_preferences` is now tenant-scoped** — new `tenant_id` column (same bigint-or-uuid string convention as `qz_print_jobs.tenant_id`, defaulting to `''` rather than `null` so the composite unique index keeps enforcing correctly for single-tenant installs — MySQL treats `NULL` as distinct-from-itself in unique indexes). Folded into `setPrinter`/`getPrinter`/`clearCache` via a new shared `resolveTenantId()` helper (also de-duplicates what `print()`/`jobs()` had inlined separately). `smart-print.js` sends `tenant_id` on printer-memory calls too now, not just job logging.
+
+### ⬆️ Upgrade Notes
+
+Schema change to `qz_printer_preferences` (new `tenant_id` column + updated unique index). If you already ran the v1.1.0/v1.1.1 migration:
+```bash
+php artisan migrate:rollback --step=1   # drops qz_printer_preferences
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-migrations --force
+php artisan migrate
+```
+
+---
+
 ## [v1.1.1] — 2026-07-22
 
 > Consolidates `qz_print_jobs`' two id columns (`id` bigint + `uuid` string) into one, type controlled by config.

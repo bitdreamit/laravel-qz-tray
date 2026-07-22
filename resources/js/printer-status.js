@@ -11,6 +11,7 @@
                 position: 'bottom-right',
                 showPrinterName: true,
                 showConnection: true,
+                showDeviceId: false, // v1.1.1+: opt-in diagnostic display for shared/kiosk workstations
                 autoHide: false,
                 hideDelay: 3000,
                 updateInterval: 5000,
@@ -89,8 +90,18 @@
             printerSpan.className = 'printer-name';
             printerSpan.style.cssText = 'font-weight: 500;';
 
+            // Device id (opt-in) — full uuid on hover, short form inline.
+            // Lets someone standing at a lab/kiosk workstation confirm
+            // which stored device identity it's using without opening
+            // devtools, e.g. while troubleshooting why two PCs sharing a
+            // login ended up with different remembered printers.
+            const deviceSpan = document.createElement('span');
+            deviceSpan.className = 'device-id';
+            deviceSpan.style.cssText = 'font-size: 10px; opacity: 0.55; font-family: monospace;';
+
             textContainer.appendChild(connectionSpan);
             textContainer.appendChild(printerSpan);
+            textContainer.appendChild(deviceSpan);
 
             this.element.appendChild(icon);
             this.element.appendChild(textContainer);
@@ -161,6 +172,19 @@
             const icon = this.element.querySelector('.status-icon');
             if (icon) {
                 icon.textContent = this.isConnected ? '🖨️' : '❌';
+            }
+
+            // Update device id (opt-in, off by default)
+            const deviceSpan = this.element.querySelector('.device-id');
+            if (deviceSpan) {
+                if (this.options.showDeviceId && window.SmartPrint && window.SmartPrint.getDeviceId) {
+                    const fullId = window.SmartPrint.getDeviceId();
+                    deviceSpan.textContent = 'Device: ' + fullId.slice(0, 8) + '…';
+                    deviceSpan.title = fullId; // full uuid on hover, for copy/paste into support tickets
+                } else {
+                    deviceSpan.textContent = '';
+                    deviceSpan.title = '';
+                }
             }
         }
 

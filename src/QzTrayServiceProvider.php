@@ -51,6 +51,7 @@ class QzTrayServiceProvider extends ServiceProvider
                 Console\Commands\InstallQzTray::class,
                 Console\Commands\GenerateCertificate::class,
                 Console\Commands\ClearQzCache::class,
+                Console\Commands\PrunePreferences::class,
             ]);
         }
     }

@@ -142,6 +142,33 @@ class QzSecurityController extends Controller
             || (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value);
     }
 
+    /**
+     * Resolves tenant_id/project_id the same way for every endpoint:
+     * explicit request value (either param name) wins, then the optional
+     * `qz-tray.tenant_id_resolver` config callback, else null. Centralizes
+     * what print() and jobs() previously duplicated inline, and is now also
+     * used by setPrinter/getPrinter/clearCache (BUG recommendation #4 —
+     * qz_printer_preferences is tenant-scoped too, not just qz_print_jobs).
+     *
+     * Returns '' (not null) when there's genuinely no tenant, matching the
+     * qz_printer_preferences.tenant_id column default — see that
+     * migration's docblock for why NULL isn't used there.
+     */
+    private function resolveTenantId(Request $request): ?string
+    {
+        $tenantId = $request->input('tenant_id') ?? $request->input('project_id');
+
+        if ($tenantId === null && is_callable(config('qz-tray.tenant_id_resolver'))) {
+            $tenantId = call_user_func(config('qz-tray.tenant_id_resolver'), $request);
+        }
+
+        if ($tenantId === null || ! $this->isBigintOrUuid((string) $tenantId)) {
+            return null;
+        }
+
+        return (string) $tenantId;
+    }
+
     private function resolveIdentities(Request $request): array
     {
         $identities = [];
@@ -169,12 +196,23 @@ class QzSecurityController extends Controller
     public function setPrinter(Request $request): \Illuminate\Http\JsonResponse
     {
         $validated = $request->validate([
-            'printer'   => 'required|string|max:255',
-            'path'      => 'required|string|max:500',
-            'device_id' => 'nullable|uuid',
+            'printer'    => 'required|string|max:255',
+            'path'       => 'required|string|max:500',
+            'device_id'  => 'nullable|uuid',
+            'tenant_id'  => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
+                if (! $this->isBigintOrUuid($value)) {
+                    $fail("The {$attribute} must be either an integer id or a UUID.");
+                }
+            }],
+            'project_id' => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
+                if (! $this->isBigintOrUuid($value)) {
+                    $fail("The {$attribute} must be either an integer id or a UUID.");
+                }
+            }],
         ]);
 
         $identities = $this->resolveIdentities($request);
+        $tenantId   = $this->resolveTenantId($request) ?? '';
 
         if (empty($identities)) {
             return response()->json([
@@ -185,7 +223,12 @@ class QzSecurityController extends Controller
 
         foreach ($identities as $type => $value) {
             \DB::table('qz_printer_preferences')->updateOrInsert(
-                ['identity_type' => $type, 'identity_value' => $value, 'path' => $validated['path']],
+                [
+                    'tenant_id'      => $tenantId,
+                    'identity_type'  => $type,
+                    'identity_value' => $value,
+                    'path'           => $validated['path'],
+                ],
                 ['printer_name' => $validated['printer'], 'updated_at' => now(), 'created_at' => now()]
             );
         }
@@ -195,12 +238,14 @@ class QzSecurityController extends Controller
             'printer'    => $validated['printer'],
             'path'       => $validated['path'],
             'scoped_to'  => array_keys($identities),
+            'tenant_id'  => $tenantId !== '' ? $tenantId : null,
         ]);
     }
 
     public function getPrinter(Request $request, string $path): \Illuminate\Http\JsonResponse
     {
         $identities = $this->resolveIdentities($request);
+        $tenantId   = $this->resolveTenantId($request) ?? '';
         $priority   = config('qz-tray.identity_priority', ['device', 'user', 'session']);
 
         $printer = null;
@@ -212,6 +257,7 @@ class QzSecurityController extends Controller
             }
 
             $row = \DB::table('qz_printer_preferences')
+                ->where('tenant_id', $tenantId)
                 ->where('identity_type', $type)
                 ->where('identity_value', $identities[$type])
                 ->where('path', $path)
@@ -236,12 +282,26 @@ class QzSecurityController extends Controller
     {
         $identities = $this->resolveIdentities($request);
 
+        // Unlike setPrinter/getPrinter, an explicit tenant is optional here:
+        // if the caller passes one, only that tenant's rows for this
+        // identity are cleared; if not, this identity's stored printer is
+        // wiped across every tenant it has a row in — the more useful
+        // default for "reset this workstation" style calls, since a caller
+        // clearing cache generally doesn't know (or care) which tenants a
+        // shared device has previously printed for.
+        $explicitTenant = $request->input('tenant_id') ?? $request->input('project_id');
+
         $deleted = 0;
         foreach ($identities as $type => $value) {
-            $deleted += \DB::table('qz_printer_preferences')
+            $query = \DB::table('qz_printer_preferences')
                 ->where('identity_type', $type)
-                ->where('identity_value', $value)
-                ->delete();
+                ->where('identity_value', $value);
+
+            if ($explicitTenant !== null) {
+                $query->where('tenant_id', $this->resolveTenantId($request) ?? '');
+            }
+
+            $deleted += $query->delete();
         }
 
         // Legacy Cache/session keys from pre-1.1 installs, cleaned up best-effort.
@@ -330,10 +390,7 @@ class QzSecurityController extends Controller
         // multi-tenant apps (e.g. stancl/tenancy) that want every print job
         // auto-tagged with the current tenant without every call site
         // having to pass it explicitly.
-        $tenantId = $request->input('tenant_id') ?? $request->input('project_id');
-        if ($tenantId === null && is_callable(config('qz-tray.tenant_id_resolver'))) {
-            $tenantId = call_user_func(config('qz-tray.tenant_id_resolver'), $request);
-        }
+        $tenantId = $this->resolveTenantId($request);
 
         // Persist to database when the qz_print_jobs table exists.
         // This makes the migration that ships with the package actually useful.
@@ -418,12 +475,9 @@ class QzSecurityController extends Controller
         // via the resolver), narrow further to that project — matters when
         // a shared device/user identity is reused across more than one
         // project's data within the same host app.
-        $tenantId = $request->input('tenant_id') ?? $request->input('project_id');
-        if ($tenantId === null && is_callable(config('qz-tray.tenant_id_resolver'))) {
-            $tenantId = call_user_func(config('qz-tray.tenant_id_resolver'), $request);
-        }
-        if ($tenantId !== null && $this->isBigintOrUuid((string) $tenantId)) {
-            $query->where('tenant_id', (string) $tenantId);
+        $tenantId = $this->resolveTenantId($request);
+        if ($tenantId !== null) {
+            $query->where('tenant_id', $tenantId);
         }
 
         $jobs = $query->limit(100)->get(['id', 'printer_name', 'document_type', 'status', 'copies', 'created_at']);

@@ -23,6 +23,13 @@ use Illuminate\Support\Facades\Schema;
  * side by side ("both support") — QzSecurityController prefers user, then
  * device, then session, and never mixes one identity's row into another's
  * response.
+ *
+ * v1.1.1: adds `tenant_id`, folding this table into the same bigint-or-uuid
+ * tenant/project scoping already applied to qz_print_jobs (see BUG-24).
+ * Stored as '' rather than null for "no tenant" — MySQL's unique index
+ * treats NULL as distinct from every other NULL, which would silently stop
+ * enforcing the uniqueness constraint below for the common single-tenant
+ * case if left nullable.
  */
 return new class extends Migration
 {
@@ -30,14 +37,18 @@ return new class extends Migration
     {
         Schema::create('qz_printer_preferences', function (Blueprint $table) {
             $table->id();
+            $table->string('tenant_id')->default(''); // '' = no tenant scoping (single-tenant apps)
             $table->string('identity_type', 20); // user | device | session
             $table->string('identity_value');    // user id, device UUID, or session id
             $table->string('path', 500);
             $table->string('printer_name');
             $table->timestamps();
 
-            $table->unique(['identity_type', 'identity_value', 'path'], 'qz_pref_identity_path_unique');
-            $table->index(['identity_type', 'identity_value']);
+            $table->unique(
+                ['tenant_id', 'identity_type', 'identity_value', 'path'],
+                'qz_pref_tenant_identity_path_unique'
+            );
+            $table->index(['tenant_id', 'identity_type', 'identity_value']);
         });
     }
 
