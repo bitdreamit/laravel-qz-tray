@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.1.1] — 2026-07-22
+
+> Consolidates `qz_print_jobs`' two id columns (`id` bigint + `uuid` string) into one, type controlled by config.
+
+### 💥 Schema Change
+
+- **`qz_print_jobs.id` is now config-driven** via the new `qz-tray.id_type` setting (`'uuid'` default, or `'bigint'`). The separate `uuid` column from v1.1.0 has been removed — there is exactly one id column again, but its *type* is now a config choice instead of hardcoded to `unsignedBigInteger`:
+  - `id_type = 'uuid'` — `id` is a `uuid` primary key. The client-generated job id (`smart-print.js`, `crypto.randomUUID()`) is written straight to `id`, so the id returned to the browser always matches the row, with no separate lookup column.
+  - `id_type = 'bigint'` — `id` is a normal auto-increment integer, same as pre-1.1. `job_id` sent by the client is accepted but not used as the PK; the response's `job_id` becomes the real auto-increment value once the insert completes.
+- Read at migration time (`config('qz-tray.id_type')` inside the migration's `up()`), so set it in `.env`/config **before** running `php artisan migrate` for the first time. Changing it afterward has no retroactive effect — write a follow-up migration if you need to convert an existing install.
+- `GET /qz/jobs` and `DELETE /qz/jobs/{id}` now read/query the `id` column in both modes (previously `uuid`-only).
+
+### ⬆️ Upgrade Notes
+
+If you already ran the v1.1.0 migration (which had both `id` and `uuid` columns), this is a breaking schema change — either:
+```bash
+php artisan migrate:rollback --step=1   # drops qz_print_jobs (v1.1.0's migration)
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-migrations --force
+php artisan migrate
+```
+or write your own follow-up migration to drop the `uuid` column and convert `id`'s type in place if you have existing job history to preserve.
+
+---
+
 ## [v1.1.0] — 2026-07-22
 
 > UUID device identity, multi-workstation printer-memory correctness, and queue management wired end-to-end. See `BUG_REPORT.md` addendum for full detail (BUG-19 to BUG-23).
@@ -18,6 +42,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **HIGH** — Fixed `GET /qz/jobs` and `DELETE /qz/jobs/{id}` being hardcoded stubs that never queried the database, making the print-queue management endpoints unreachable in practice.
 - **HIGH** — Fixed the printer-selection modal orphaning a job's promise by re-enqueueing a cloned object instead of the original — a caller awaiting `SmartPrint.print()` before any printer was chosen would hang forever.
 - **LOW** — Bumped pinned QZ Tray client library from `2.2.5` to `2.2.6` (upstream fixed a websocket race condition and improved hardware I/O locking/concurrency).
+- **MEDIUM** — `qz_print_jobs.tenant_id` was `unsignedBigInteger`-only and hardcoded to `null` — same bigint-vs-uuid problem `user_id` had pre-1.1, and never actually populated by any code path. Now a nullable string column accepting either a bigint id or a UUID, actually settable via `tenant_id`/`project_id` on `POST /qz/print`.
 
 ### ✨ New Features
 
@@ -26,6 +51,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **Server-synced printer memory** — `smart-print.js` now optionally backs up/restores printer selection via the server (opt-out with `window.QZ_CONFIG.serverSync = false`), in addition to `localStorage`.
 - **Real, correlated job IDs** — print jobs use client-generated UUIDs that match the `uuid` column on `qz_print_jobs`, so `jobs()` and `cancelJob()` now operate on real, identity-scoped data instead of stubs.
 - **New migration** `2026_07_22_000000_create_qz_printer_preferences_table.php` — durable, identity-scoped printer memory storage.
+- **`tenant_id`/`project_id` dual bigint/UUID support** — `POST /qz/print` accepts either name for the same column; validated as either an integer id or a UUID, so this package works unmodified whether the host project's tenant/project table is bigint- or UUID-keyed. Optional `qz-tray.tenant_id_resolver` config auto-tags jobs for multi-tenant apps that don't want to pass it at every call site.
 
 ### 📦 Compatibility
 

@@ -359,6 +359,13 @@ window.SmartPrint = (() => {
     // ever saw, so the queue/cancel endpoints were unreachable from the UI.
     function logPrintJob(job, printer, status) {
         if (!serverSyncEnabled()) return;
+        // Per-job value wins; otherwise fall back to a page-wide default set
+        // by the host app (e.g. window.QZ_CONFIG.tenantId = '{{ $project->id }}'
+        // — works whether that id is a bigint or a uuid string).
+        const tenantId = job.tenantId ?? job.projectId
+            ?? (window.QZ_CONFIG && (window.QZ_CONFIG.tenantId ?? window.QZ_CONFIG.projectId))
+            ?? undefined;
+
         fetch('/qz/print', {
             method: 'POST',
             cache:  'no-store',
@@ -376,6 +383,7 @@ window.SmartPrint = (() => {
                 data:      job.url ? undefined : (job.data || undefined),
                 copies:    job.copies,
                 device_id: getDeviceId(),
+                tenant_id: tenantId !== undefined ? String(tenantId) : undefined,
                 metadata:  { status: status || 'completed' },
             }),
         }).catch(() => {}); // logging failure must never block/alter the print result

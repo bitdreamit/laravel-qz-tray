@@ -87,6 +87,45 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Tenant / Project ID Resolver
+    |--------------------------------------------------------------------------
+    | Optional callable(Request $request): string|int|null. Every print job
+    | is tagged with a tenant_id/project_id (see the qz_print_jobs.tenant_id
+    | column — stored as a string so it works whether the calling project's
+    | "project"/"tenant" table uses a bigint or a uuid primary key). Callers
+    | can always pass `tenant_id` or `project_id` explicitly in the request;
+    | this resolver only fires when neither was sent, e.g. for multi-tenant
+    | apps (stancl/tenancy, etc.) that want every job auto-tagged with the
+    | current tenant without passing it at every call site:
+    |
+    |   'tenant_id_resolver' => fn ($request) => tenant('id'),
+    |
+    | Leave null to require explicit tenant_id/project_id on each request.
+    */
+    'tenant_id_resolver' => null,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Print Job ID Type
+    |--------------------------------------------------------------------------
+    | v1.1.1+: controls the primary key type of the qz_print_jobs table.
+    | Read at migration time — change it BEFORE running
+    | `php artisan migrate` for the first time; changing it afterwards has
+    | no effect on an already-created table (drop/recreate or write a new
+    | migration if you need to convert an existing install).
+    |
+    |   'uuid'   (default) - id is a uuid. Never a guessable sequential
+    |             integer, so it's safe to hand straight back to the client
+    |             and is what GET /qz/jobs and DELETE /qz/jobs/{id} use.
+    |   'bigint' - id is a normal auto-increment integer. Slightly smaller/
+    |             faster index; fine for fully internal/admin-only queues
+    |             where exposing a sequential id to the browser isn't a
+    |             concern.
+    */
+    'id_type' => env('QZ_JOB_ID_TYPE', 'uuid'),
+
+    /*
+    |--------------------------------------------------------------------------
     | WebSocket Settings
     |--------------------------------------------------------------------------
     | Default port is 8181 (QZ Tray default).

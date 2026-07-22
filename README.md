@@ -287,6 +287,13 @@ return [
     // if printer choice should follow a person between machines instead.
     'identity_priority' => ['device', 'user', 'session'],
 
+    // v1.1.1+: primary key type for qz_print_jobs. Read at migration time —
+    // set BEFORE first `php artisan migrate`. 'uuid' (default): id is a
+    // uuid, safe to hand straight to the client (used as-is by
+    // GET /qz/jobs and DELETE /qz/jobs/{id}). 'bigint': plain
+    // auto-increment id.
+    'id_type' => env('QZ_JOB_ID_TYPE', 'uuid'),
+
     // QZ Tray WebSocket connection
     'websocket' => [
         'host'    => env('QZ_WEBSOCKET_HOST', 'localhost'),

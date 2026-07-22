@@ -125,6 +125,23 @@ class QzSecurityController extends Controller
      * always falls through to `config('qz-tray.default_printer')`, never
      * to some other user's/device's last selection.
      */
+    /**
+     * True if $value is either an unsigned integer (bigint-keyed project
+     * table) or a UUID (uuid-keyed project table). Used to validate
+     * tenant_id/project_id without hardcoding a single PK type — this
+     * package is installed across multiple client projects that don't all
+     * key their "project"/"tenant" table the same way.
+     */
+    private function isBigintOrUuid(?string $value): bool
+    {
+        if ($value === null || $value === '') {
+            return true; // nullable — handled by the 'nullable' rule, not here
+        }
+
+        return (bool) preg_match('/^\d+$/', $value)
+            || (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value);
+    }
+
     private function resolveIdentities(Request $request): array
     {
         $identities = [];
@@ -265,19 +282,58 @@ class QzSecurityController extends Controller
             'copies'     => 'nullable|integer|min:1|max:999',
             'document'   => 'nullable|string|max:255',
             'device_id'  => 'nullable|uuid',
+            'job_id'     => 'nullable|uuid',
             'metadata'   => 'nullable|array',
+            // Accepted under either name: some host apps call it
+            // "tenant_id", others "project_id" — same value, one column.
+            'tenant_id'  => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
+                if (! $this->isBigintOrUuid($value)) {
+                    $fail("The {$attribute} must be either an integer id or a UUID.");
+                }
+            }],
+            'project_id' => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
+                if (! $this->isBigintOrUuid($value)) {
+                    $fail("The {$attribute} must be either an integer id or a UUID.");
+                }
+            }],
         ]);
 
-        // uniqid('qz_', true) is time-based (microseconds + a per-process
-        // counter). Under concurrent print requests from several
-        // workstations hitting the same web worker in the same
-        // microsecond window it is not guaranteed unique, and it is not a
-        // valid `uuid` column value for the migration below. Str::uuid()
-        // (uuid4, backed by ramsey/uuid which Laravel already requires)
-        // is collision-safe and matches the `uuid` column type.
-        $jobId = (string) \Illuminate\Support\Str::uuid();
+        // v1.1.1: the primary key IS the job identifier now (no separate
+        // `id` (bigint) + `uuid` (string) pair — see the migration). Which
+        // type it is was fixed at migrate-time by config('qz-tray.id_type'):
+        //
+        //   uuid mode   — the client-generated id (smart-print.js mints one
+        //                 per job via crypto.randomUUID() and sends it as
+        //                 `job_id`) IS what gets written to `id`, so the id
+        //                 returned to the browser always matches the row —
+        //                 no lookup/translation step needed.
+        //   bigint mode — a client-supplied job_id can't become the PK, so
+        //                 the row is inserted without one and the
+        //                 database-assigned auto-increment value becomes
+        //                 $jobId instead, once the insert below completes.
+        $usesUuid   = config('qz-tray.id_type', 'uuid') === 'uuid';
+        $clientJobId = $request->input('job_id');
+        $jobId = ($usesUuid && $clientJobId)
+            ? $clientJobId
+            // Not collision-safe uniqid() (used pre-1.1) — Str::uuid()
+            // (uuid4, via ramsey/uuid, already a Laravel dependency) is.
+            // Also serves as the pre-insert placeholder in bigint mode,
+            // for the (db_logged === false) response path below.
+            : (string) \Illuminate\Support\Str::uuid();
         $type  = $request->input('type');
         $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
+
+        // Project/tenant id: explicit request value wins (bigint OR uuid,
+        // whichever the host app's project model uses — see the migration
+        // comment on the `tenant_id` column). If the host app didn't send
+        // one, fall back to an optional app-supplied resolver — useful for
+        // multi-tenant apps (e.g. stancl/tenancy) that want every print job
+        // auto-tagged with the current tenant without every call site
+        // having to pass it explicitly.
+        $tenantId = $request->input('tenant_id') ?? $request->input('project_id');
+        if ($tenantId === null && is_callable(config('qz-tray.tenant_id_resolver'))) {
+            $tenantId = call_user_func(config('qz-tray.tenant_id_resolver'), $request);
+        }
 
         // Persist to database when the qz_print_jobs table exists.
         // This makes the migration that ships with the package actually useful.
@@ -285,9 +341,8 @@ class QzSecurityController extends Controller
         if (\Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
             try {
                 $user = $request->user();
-                \DB::table('qz_print_jobs')->insert([
-                    'uuid'          => $jobId,
-                    'tenant_id'     => null,
+                $row = [
+                    'tenant_id'     => $tenantId,
                     'user_id'       => $user?->getAuthIdentifier(),
                     'user_type'     => $user ? get_class($user) : null,
                     'device_id'     => $deviceId,
@@ -299,7 +354,18 @@ class QzSecurityController extends Controller
                     'metadata'      => json_encode($request->input('metadata', [])),
                     'created_at'    => now(),
                     'updated_at'    => now(),
-                ]);
+                ];
+
+                if ($usesUuid) {
+                    $row['id'] = $jobId;
+                    \DB::table('qz_print_jobs')->insert($row);
+                } else {
+                    // Auto-increment PK: the id can only be known after
+                    // insert. Overwrites the placeholder uuid above with
+                    // the real row id so the response's job_id actually
+                    // matches what jobs()/cancelJob() can look up.
+                    $jobId = (string) \DB::table('qz_print_jobs')->insertGetId($row);
+                }
                 $dbLogged = true;
             } catch (\Throwable $e) {
                 Log::warning('[QZ Tray] Could not persist print job to DB: ' . $e->getMessage());
@@ -348,7 +414,19 @@ class QzSecurityController extends Controller
             $query->where('device_id', $deviceId);
         }
 
-        $jobs = $query->limit(100)->get(['uuid', 'printer_name', 'document_type', 'status', 'copies', 'created_at']);
+        // Additive: when a tenant_id/project_id is supplied (explicitly or
+        // via the resolver), narrow further to that project — matters when
+        // a shared device/user identity is reused across more than one
+        // project's data within the same host app.
+        $tenantId = $request->input('tenant_id') ?? $request->input('project_id');
+        if ($tenantId === null && is_callable(config('qz-tray.tenant_id_resolver'))) {
+            $tenantId = call_user_func(config('qz-tray.tenant_id_resolver'), $request);
+        }
+        if ($tenantId !== null && $this->isBigintOrUuid((string) $tenantId)) {
+            $query->where('tenant_id', (string) $tenantId);
+        }
+
+        $jobs = $query->limit(100)->get(['id', 'printer_name', 'document_type', 'status', 'copies', 'created_at']);
 
         return response()->json(['success' => true, 'jobs' => $jobs]);
     }
@@ -359,7 +437,7 @@ class QzSecurityController extends Controller
             return response()->json(['success' => false, 'message' => 'qz_print_jobs table not migrated'], 404);
         }
 
-        $job = \DB::table('qz_print_jobs')->where('uuid', $id)->first();
+        $job = \DB::table('qz_print_jobs')->where('id', $id)->first();
 
         if (! $job) {
             return response()->json(['success' => false, 'message' => "Print job {$id} not found"], 404);
@@ -372,7 +450,7 @@ class QzSecurityController extends Controller
             ], 409);
         }
 
-        \DB::table('qz_print_jobs')->where('uuid', $id)->update([
+        \DB::table('qz_print_jobs')->where('id', $id)->update([
             'status'       => 'cancelled',
             'processed_at' => now(),
             'updated_at'   => now(),

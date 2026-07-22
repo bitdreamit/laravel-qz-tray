@@ -370,15 +370,44 @@ These are design observations, not bugs:
 
 ---
 
-## Files Changed (v1.1.0)
+## BUG-24 — `tenant_id` hardcoded to bigint-only and never actually populated (Medium)
+
+**Files:** `database/migrations/2026_01_01_000000_create_qz_print_jobs_table.php`, `src/Http/Controllers/QzSecurityController.php`, `config/qz-tray.php`, `resources/js/smart-print.js`
+
+**Problem:** `qz_print_jobs.tenant_id` was declared `unsignedBigInteger` — the exact same class of bug BUG-12 fixed for `user_id` (this package is installed across multiple client projects whose "project"/"tenant" table's primary key is bigint in some apps, UUID in others; a bigint-only column would reject or truncate a UUID project id). On top of that, `print()` hardcoded `'tenant_id' => null` — the column was never actually written to by any code path, so even bigint-keyed projects got no tenant scoping.
+
+**Fix:**
+- `tenant_id` column changed from `unsignedBigInteger` to `string` (nullable) — holds either a numeric id or a UUID without a schema change, mirroring the `nullableMorphs` approach already used for `user_id`. Added a `(tenant_id, status)` index for per-project queue queries.
+- `print()` now accepts `tenant_id` (or `project_id`, same column, either name accepted) in the request, validated as either an unsigned integer or a UUID via a new `isBigintOrUuid()` helper, and stores it.
+- New `qz-tray.tenant_id_resolver` config: an optional `callable(Request): string|int|null` for multi-tenant host apps that want every job auto-tagged with the current tenant without passing it at every call site — only used when the request didn't supply `tenant_id`/`project_id` explicitly.
+- `jobs()` (queue listing) additively filters by `tenant_id` when present, on top of the existing user/device scoping from BUG-19/21 — narrows the queue further when a shared device/user identity spans more than one project's data.
+- `smart-print.js`'s `logPrintJob()` forwards `job.tenantId`/`job.projectId` (per-job) or `window.QZ_CONFIG.tenantId`/`.projectId` (page-wide default) as `tenant_id` on the print-log request.
+
+---
+
+---
+
+## BUG-25 — Redundant `id` + `uuid` column pair; no way to choose a uuid primary key (v1.1.1)
+
+**Files:** `database/migrations/2026_01_01_000000_create_qz_print_jobs_table.php`, `src/Http/Controllers/QzSecurityController.php`, `config/qz-tray.php`
+
+**Problem:** BUG-21's fix (v1.1.0) added a `uuid` column alongside the existing auto-increment `id`, because `id` was never meant to be client-facing (BUG-21's own comment: *"Never expose the auto-increment id to the client — it leaks row counts and is guessable"*). That's correct for installs that want a sequential PK, but it means every install pays for two indexed id columns even when the sequential `id` is never used for anything, and there was no way to just make the primary key itself a uuid.
+
+**Fix:** `qz-tray.id_type` config (`'uuid'` default | `'bigint'`), read at migration time. `id` is now either `$table->uuid('id')->primary()` or `$table->id()` — never both a bigint and a separate uuid column. `print()`, `jobs()`, and `cancelJob()` all operate on `id` directly; in uuid mode the client-generated job id becomes the row's PK with no translation step, in bigint mode the client's id is accepted but the response substitutes the real auto-increment value once the row exists.
+
+**Note:** this is a breaking schema change relative to v1.1.0's migration (see `RELEASE_NOTES.md` upgrade notes) — not additive like BUG-19 through BUG-24.
+
+---
+
+## Files Changed (v1.1.0 – v1.1.1)
 
 | File | Bugs Fixed |
 |------|-----------|
-| `src/Http/Controllers/QzSecurityController.php` | BUG-19, BUG-21 |
-| `config/qz-tray.php` | BUG-19 |
-| `database/migrations/2026_01_01_000000_create_qz_print_jobs_table.php` | BUG-21 |
+| `src/Http/Controllers/QzSecurityController.php` | BUG-19, BUG-21, BUG-24, BUG-25 |
+| `config/qz-tray.php` | BUG-19, BUG-24, BUG-25 |
+| `database/migrations/2026_01_01_000000_create_qz_print_jobs_table.php` | BUG-21, BUG-24, BUG-25 |
 | `database/migrations/2026_07_22_000000_create_qz_printer_preferences_table.php` (new) | BUG-19 |
-| `resources/js/smart-print.js` | BUG-19, BUG-20, BUG-21, BUG-22 |
+| `resources/js/smart-print.js` | BUG-19, BUG-20, BUG-21, BUG-22, BUG-24 |
 | `README.md`, `src/Console/Commands/InstallQzTray.php`, `resources/views/smart.blade.php` | BUG-23 |
 
 ## New Migration Required
@@ -393,3 +422,4 @@ php artisan migrate
 1. **`printer-switcher.js`/`printer-status.js`** still only read `SmartPrint.getCurrentPrinter()`/localStorage — consider surfacing `getDeviceId()` in the status widget for on-screen confirmation of which workstation identity is active (useful for lab-PC troubleshooting).
 2. **`identity_priority` = `device` first** is the right default for shared/kiosk workstations (your Mirth Connect PC → multi-analyzer topology) but wrong for apps where a person's printer choice should follow them between machines — flip the config to `['user', 'device', 'session']` for that case.
 3. **`qz_printer_preferences` rows are never pruned.** `printer_cache_duration` config still exists but nothing acts on it now that Cache TTL isn't the storage mechanism. Consider a scheduled command (`qz:prune-preferences --older-than=90`) if this matters for your retention policy.
+4. **`qz_printer_preferences` is not tenant-scoped.** Only `qz_print_jobs` got a `tenant_id` column in this pass. If two projects sharing one database also need isolated printer *memory* (not just job history), the same `tenant_id` (string, bigint-or-uuid) column should be added to `qz_printer_preferences` and folded into `resolveIdentities()`.
