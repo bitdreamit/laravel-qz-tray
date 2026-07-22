@@ -1,7 +1,7 @@
 # Laravel QZ Tray
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012-FF2D20?style=for-the-badge&logo=laravel&logoColor=white" alt="Laravel">
+  <img src="https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012|%2013-FF2D20?style=for-the-badge&logo=laravel&logoColor=white" alt="Laravel">
   <img src="https://img.shields.io/badge/PHP-8.1%2B-777BB4?style=for-the-badge&logo=php&logoColor=white" alt="PHP">
   <img src="https://img.shields.io/badge/QZ%20Tray-2.x-0078D4?style=for-the-badge" alt="QZ Tray">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
@@ -85,11 +85,11 @@ Browser  ──HTTP──►  Laravel App  ──WebSocket──►  QZ Tray (de
 
 ## Requirements
 
-| Requirement | Version |
-|-------------|---------|
-| PHP | 8.1 or higher |
-| Laravel | 10, 11, or 12 |
-| PHP extension | `ext-openssl` (for certificate generation) |
+| Requirement | Version                                     |
+|-------------|---------------------------------------------|
+| PHP | 8.1 or higher                               |
+| Laravel | 10, 11, 12 or 13                            |
+| PHP extension | `ext-openssl` (for certificate generation)  |
 | QZ Tray (client) | 2.x — installed on each machine that prints |
 
 > **Note:** QZ Tray must be installed on every **client machine** (the computer connected to the printer). It does NOT need to be on your server.
@@ -261,10 +261,10 @@ return [
         'algorithm'     => 'sha256',
         'key_bits'      => 2048,
         'subject' => [
-            'countryName'      => 'US',
-            'organizationName' => 'My Company',
-            'commonName'       => 'My App QZ Tray',
-            'emailAddress'     => 'admin@myapp.com',
+            'countryName'      => 'BD',
+            'organizationName' => 'Bit Dream IT',
+            'commonName'       => 'Laravel QZ Tray',
+            'emailAddress'     => 'info@bitdreamit.com',
         ],
     ],
 
