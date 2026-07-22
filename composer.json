@@ -1,6 +1,6 @@
 {
     "name": "bitdreamit/laravel-qz-tray",
-    "version": "1.1.3",
+    "version": "1.1.4",
     "description": "Laravel QZ Tray is a complete silent printing solution that connects your Laravel application to desktop printers via QZ Tray. It allows you to print directly from the browser without print dialogs, with smart caching, printer memory, and automatic fallback.",
     "type": "library",
     "keywords": [
@@ -27,8 +27,8 @@
         "ext-openssl": "*"
     },
     "require-dev": {
-        "orchestra/testbench": "^8.0|^9.0|^10.0",
-        "phpunit/phpunit": "^10.0|^11.0"
+        "orchestra/testbench": "^8.0|^9.0|^10.0|^11.0",
+        "phpunit/phpunit": "^10.0|^11.0|^12.0"
     },
     "autoload": {
         "psr-4": {

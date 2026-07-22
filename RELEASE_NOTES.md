@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.1.4] — 2026-07-23
+
+> Laravel 13 support, and the vendored `qz-tray.js` now genuinely runs 2.2.6 (not just a relabeled 2.2.5).
+
+### ✨ New Support
+
+- **Laravel 13** (released March 17, 2026, PHP 8.3+) — `illuminate/support`, `illuminate/database`, `illuminate/routing` constraints widened to `^10.0|^11.0|^12.0|^13.0`. No code changes were needed: Laravel 13's own release notes describe it as zero-breaking-change from 12, and this package doesn't touch any of the few areas that did change (MySQL `DELETE ... JOIN/ORDER BY/LIMIT` compilation, polymorphic pivot table naming, CSRF origin config). The package's own `php: ^8.1` constraint didn't need bumping either — it's a floor, and PHP 8.3+ (required by Laravel 13) already satisfies it.
+- Also fixed `require-dev` `orchestra/testbench`, which had never been updated for Laravel 12 support in the first place (still `^8.0|^9.0` covering only Laravel 10/11) — now `^8.0|^9.0|^10.0|^11.0`, plus `phpunit/phpunit` `^12.0` for the Laravel 13/PHP 8.3 combination.
+
+### 🐛 Bug Fix
+
+- **BUG-26** — `resources/js/qz-tray.js` (the vendored, self-hostable copy of the actual QZ Tray library — separate from the CDN reference bumped in BUG-23/v1.1.0) still both labeled *and ran* genuine 2.2.5 code. Verified the vendored copy was byte-identical to real upstream 2.2.5 (no local customizations to lose), then replaced it with genuine upstream 2.2.6 from the npm registry — not just an edited version comment. Used by `default.blade.php`/`example.blade.php` via `public/vendor/qz-tray/js/qz-tray.js`.
+
+---
+
+## [v1.1.3] — 2026-07-22
+
+> Job ids are now UUIDv7 (time-ordered, RFC 9562) by default instead of v4, with automatic per-request fallback to v4.
+
+### ✨ Improvement
+
+- **UUIDv7 job ids** — when `qz-tray.id_type` is `'uuid'` (default), ids are now generated as v7 instead of v4 by default, controlled by new `qz-tray.uuid_version` config (`'v7'` default | `'v4'`). v7 embeds a millisecond timestamp in the first 48 bits, so ids sort roughly by creation time — far better B-tree index locality for a write-heavy table like `qz_print_jobs` than v4's fully-random layout, which scatters every insert to a random leaf page. Both versions are valid values for the same `uuid` column, so this isn't a schema change.
+- **Server-side**: new `generateUuid()` helper tries `Str::uuid7()` (native since Laravel 11) and transparently falls back to `Str::uuid()` (v4) when the method doesn't exist — this package supports Laravel 10.x, which has no native v7 support — or if generation throws for any other reason (e.g. an incompatible pinned `ramsey/uuid`).
+- **Client-side**: `smart-print.js` gained a manual RFC 9562 v7 generator (no browser exposes a native v7 API yet — `crypto.randomUUID()` is v4-only), used for every job id via a new `generateJobId()` entry point, falling back to the existing v4 generator (`uuid4()`) if v7 generation throws or `window.QZ_CONFIG.uuidVersion === 'v4'` is set.
+- Device ids (`X-Device-Id`, from `getDeviceId()`) are unaffected and remain v4 — they're generated once and never queried by time range, so there's no index-locality benefit to gain there.
+
+### ⬆️ Upgrade Notes
+
+No schema or breaking change. Purely a generation-algorithm swap for `id_type = 'uuid'` installs; existing v4 rows and new v7 rows coexist fine in the same column. Set `QZ_UUID_VERSION=v4` in `.env` to keep the old behavior.
+
+---
+
 ## [v1.1.2] — 2026-07-22
 
 > Implements all four v1.1.0/v1.1.1 "Recommendations (not fixed)" items.

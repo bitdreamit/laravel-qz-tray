@@ -132,6 +132,31 @@ class QzSecurityController extends Controller
      * package is installed across multiple client projects that don't all
      * key their "project"/"tenant" table the same way.
      */
+    /**
+     * v7 when config('qz-tray.uuid_version') allows it AND the running
+     * Laravel actually has Str::uuid7() (native since Laravel 11 — this
+     * package also supports 10.x, which doesn't have it), falling back to
+     * the classic v4 on any failure. Feature-detected via method_exists()
+     * rather than a Laravel version check, since what matters is whether
+     * the method is callable, not which version string is reported (a
+     * pinned older ramsey/uuid on an otherwise-11.x app would fail the
+     * same way).
+     */
+    private function generateUuid(): string
+    {
+        if (config('qz-tray.uuid_version', 'v7') === 'v7'
+            && method_exists(\Illuminate\Support\Str::class, 'uuid7')) {
+            try {
+                return (string) \Illuminate\Support\Str::uuid7();
+            } catch (\Throwable $e) {
+                // Fall through to v4 below — e.g. an incompatible
+                // ramsey/uuid version present despite the method existing.
+            }
+        }
+
+        return (string) \Illuminate\Support\Str::uuid();
+    }
+
     private function isBigintOrUuid(?string $value): bool
     {
         if ($value === null || $value === '') {
@@ -375,11 +400,11 @@ class QzSecurityController extends Controller
         $clientJobId = $request->input('job_id');
         $jobId = ($usesUuid && $clientJobId)
             ? $clientJobId
-            // Not collision-safe uniqid() (used pre-1.1) — Str::uuid()
-            // (uuid4, via ramsey/uuid, already a Laravel dependency) is.
-            // Also serves as the pre-insert placeholder in bigint mode,
-            // for the (db_logged === false) response path below.
-            : (string) \Illuminate\Support\Str::uuid();
+            // Not collision-safe uniqid() (used pre-1.1) — generateUuid()
+            // (v7 when available, v4 fallback) is. Also serves as the
+            // pre-insert placeholder in bigint mode, for the
+            // (db_logged === false) response path below.
+            : $this->generateUuid();
         $type  = $request->input('type');
         $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
 

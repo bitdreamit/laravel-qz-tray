@@ -30,6 +30,61 @@ window.SmartPrint = (() => {
         });
     }
 
+    // Time-ordered UUID (RFC 9562). No browser exposes a native v7 API yet
+    // (crypto.randomUUID() is v4-only as of this writing), so this is a
+    // manual implementation: 48-bit millisecond timestamp + version nibble
+    // (0111) + 74 bits of randomness + variant bits (10). Used as the
+    // job.id sent to POST /qz/print — when config('qz-tray.id_type') is
+    // 'uuid', that id becomes the qz_print_jobs primary key directly (see
+    // QzSecurityController::print()), so a v4-random PK would scatter
+    // inserts randomly across the table's B-tree index; v7's leading
+    // timestamp keeps new rows appending near the end instead, same index
+    // locality benefit as an auto-increment bigint.
+    function uuid7() {
+        const ms = Date.now();
+        const tsHex = ms.toString(16).padStart(12, '0').slice(-12); // 48 bits
+
+        const rnd = new Uint8Array(10); // rand_a (12 bits) + rand_b (62 bits) = 74 bits needed; 10 bytes (80) is comfortably enough
+        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+            crypto.getRandomValues(rnd);
+        } else {
+            for (let i = 0; i < rnd.length; i++) rnd[i] = Math.floor(Math.random() * 256);
+        }
+
+        // version (4 bits, = 0111) + rand_a (12 bits, from rnd[0] + top
+        // nibble of rnd[1]) = 16 bits = 4 hex chars
+        const verRandA = (0x7000 | (((rnd[0] << 4) | (rnd[1] >> 4)) & 0x0fff))
+            .toString(16).padStart(4, '0');
+
+        // variant (2 bits, = 10, folded into rnd[2]) + rand_b (62 bits,
+        // from rnd[2]'s remaining 6 bits + rnd[3..9]) = 64 bits = 16 hex chars
+        const variantByte = (rnd[2] & 0x3f) | 0x80;
+        const tail = [variantByte, rnd[3], rnd[4], rnd[5], rnd[6], rnd[7], rnd[8], rnd[9]]
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+
+        return `${tsHex.slice(0, 8)}-${tsHex.slice(8, 12)}-${verRandA}-${tail.slice(0, 4)}-${tail.slice(4, 16)}`;
+    }
+
+    // Entry point for every job id generated in this file: v7 when enabled
+    // (default) for its DB index-locality benefit, transparently falling
+    // back to v4 if v7 generation throws for any reason (e.g. an
+    // environment without Uint8Array or Math.random — practically never,
+    // but a job id must never block a print). Config mirrors the server's
+    // qz-tray.uuid_version so both sides make the same choice by default;
+    // it isn't actually required to match (both are valid uuid column
+    // values either way), it just keeps ids consistently time-sortable
+    // when they do.
+    function generateJobId() {
+        if (window.QZ_CONFIG && window.QZ_CONFIG.uuidVersion === 'v4') {
+            return uuid4();
+        }
+        try {
+            return uuid7();
+        } catch (e) {
+            return uuid4();
+        }
+    }
+
     // Persistent per-browser identifier for THIS workstation. Distinct from
     // job ids: it never changes once generated, so the server can tell two
     // different physical machines apart even when they share a Laravel
@@ -300,7 +355,7 @@ window.SmartPrint = (() => {
     // promise would never be the one actually printed.
     function enqueue(job) {
         if (!job._promise) {
-            job.id = job.id || uuid4();
+            job.id = job.id || generateJobId();
             job._promise = new Promise((resolve, reject) => {
                 job._resolve = resolve;
                 job._reject  = reject;

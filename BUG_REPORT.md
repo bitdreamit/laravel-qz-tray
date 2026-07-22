@@ -399,6 +399,20 @@ These are design observations, not bugs:
 
 ---
 
+---
+
+## BUG-26 — Vendored `qz-tray.js` still shipped genuine 2.2.5 code despite the 2.2.6 CDN bump (v1.1.4)
+
+**File:** `resources/js/qz-tray.js`
+
+**Problem:** BUG-23 (v1.1.0) bumped the pinned CDN version from `2.2.5` to `2.2.6` in `README.md`, `InstallQzTray.php`, and `smart.blade.php` — but missed that the package also **vendors a full local copy** of the actual QZ Tray library at `resources/js/qz-tray.js` (2,860 lines, published to `public/vendor/qz-tray/js/qz-tray.js`), used by `default.blade.php` and `example.blade.php` as a self-hosted alternative to the CDN. That file's own `@version` header and internal `VERSION` constant still said `2.2.5`, and — more importantly — it was still genuinely running 2.2.5 code (the websocket race-condition fix, hardware I/O locking/concurrency improvements, and Windows SYSTEM-user install fix from 2.2.6 were absent), not just an outdated label.
+
+**Verification before fixing:** diffed the vendored file against a freshly-downloaded genuine upstream `qz-tray@2.2.5` from the npm registry — byte-identical, confirming Bit Dream IT had not customized it, so a full replacement was safe.
+
+**Fix:** Replaced `resources/js/qz-tray.js` with the genuine upstream `qz-tray@2.2.6` source (also from npm), not just an edited version string. `@version`/`VERSION` now correctly read `2.2.6` and match the actual code running.
+
+---
+
 ## Files Changed (v1.1.0 – v1.1.1)
 
 | File | Bugs Fixed |

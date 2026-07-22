@@ -294,6 +294,13 @@ return [
     // auto-increment id.
     'id_type' => env('QZ_JOB_ID_TYPE', 'uuid'),
 
+    // v1.1.3+: 'v7' (default) — time-ordered uuid, much better DB index
+    // locality than v4 for a write-heavy table (v4 scatters inserts
+    // randomly across the B-tree; v7's leading timestamp keeps them
+    // appending near the end). Falls back to v4 automatically on Laravel
+    // 10.x (no native Str::uuid7()) or if generation fails for any reason.
+    'uuid_version' => env('QZ_UUID_VERSION', 'v7'),
+
     // QZ Tray WebSocket connection
     'websocket' => [
         'host'    => env('QZ_WEBSOCKET_HOST', 'localhost'),

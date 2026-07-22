@@ -126,6 +126,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | UUID Version (when id_type = 'uuid')
+    |--------------------------------------------------------------------------
+    | 'v7' (default) - time-ordered (RFC 9562). The first 48 bits are a
+    |        millisecond timestamp, so ids sort roughly by creation time —
+    |        much better B-tree index locality than v4 for a write-heavy
+    |        table like qz_print_jobs (v4 is fully random, so every insert
+    |        lands in a random leaf page instead of appending to the end).
+    |        Falls back to v4 automatically, per-request, if:
+    |          - Str::uuid7() doesn't exist (Laravel 10.x, or ramsey/uuid
+    |            older than 4.7 — this package supports Laravel 10.x-12.x,
+    |            and 10.x has no native v7 support), or
+    |          - generation throws for any other reason.
+    |        Both versions fit the same `uuid` column — switching later, or
+    |        falling back mid-flight, is not a breaking change.
+    | 'v4' - always the classic fully-random UUID (Str::uuid()).
+    */
+    'uuid_version' => env('QZ_UUID_VERSION', 'v7'),
+
+    /*
+    |--------------------------------------------------------------------------
     | WebSocket Settings
     |--------------------------------------------------------------------------
     | Default port is 8181 (QZ Tray default).
