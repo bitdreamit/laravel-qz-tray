@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.1.6] — 2026-07-23
+
+> Environment Variables Reference was showing misleading defaults.
+
+### 📚 Documentation
+
+- **Fixed `QZ_LOGGING_ENABLED`/`QZ_LOGGING_CHANNEL`** — the README's env block showed `QZ_LOGGING_ENABLED=true` and `QZ_LOGGING_CHANNEL=daily` inside a section titled "add any of these," implying those were the package defaults. The real defaults are `false` and `stack` (per `config/qz-tray.php`) — what was shown were suggested production overrides, presented without that distinction.
+- Restructured as: a table of every variable with its real package default, a copy-paste block at-default (safe to add as-is), and a separately labeled "realistic production override" block. Nothing in this package is a *required* `.env` entry — every variable has a working default — which is now stated explicitly instead of implied.
+
+---
+
 ## [v1.1.5] — 2026-07-23
 
 > README overhaul — fixes several real gaps flagged during review, not just cosmetic cleanup.

@@ -107,11 +107,11 @@ Browser  ──HTTP──►  Laravel App  ──WebSocket──►  QZ Tray (de
 
 ## Requirements
 
-| Requirement | Version                                     |
-|-------------|---------------------------------------------|
-| PHP | 8.1 or higher                               |
-| Laravel | 10, 11,12 or 13                             |
-| PHP extension | `ext-openssl` (for certificate generation)  |
+| Requirement | Version |
+|-------------|---------|
+| PHP | 8.1 or higher |
+| Laravel | 10, 11,12 or 13  |
+| PHP extension | `ext-openssl` (for certificate generation) |
 | QZ Tray (client) | 2.x — installed on each machine that prints |
 
 > **Note:** QZ Tray must be installed on every **client machine** (the computer connected to the printer). It does NOT need to be on your server.
@@ -1441,39 +1441,45 @@ The signing endpoint is the most sensitive — consider adding rate limiting:
 
 ## Environment Variables Reference
 
-Add any of these to your `.env` file:
+**None of these are required** — every one has a working default and the package runs fully without a `.env` entry for any of them. Add only the ones you want to override.
+
+| Variable | Package default | What it controls |
+|---|---|---|
+| `QZ_DEFAULT_PRINTER` | *(none — user must pick)* | Pre-select a printer instead of prompting on first print |
+| `QZ_WEBSOCKET_HOST` | `localhost` | Host QZ Tray's WebSocket listens on |
+| `QZ_WEBSOCKET_PORT` | `8181` | Port QZ Tray's WebSocket listens on |
+| `QZ_AUTO_GENERATE_CERT` | `false` | Auto-generate a self-signed cert on boot — dev/local only |
+| `QZ_ALLOW_PUBLIC_CERT_GENERATE` | `false` | Allow cert (re)generation via HTTP — leave `false` in production |
+| `QZ_LOGGING_ENABLED` | `false` | Write every `POST /qz/print` request to your Laravel log |
+| `QZ_LOGGING_CHANNEL` | `stack` | Which log channel to use, if enabled |
+| `QZ_LOGGING_LEVEL` | `info` | Log level, if enabled |
+| `QZ_JOB_ID_TYPE` | `uuid` | `qz_print_jobs` primary key type — `uuid` or `bigint`. Read at migration time; set **before** the first `php artisan migrate` |
+| `QZ_UUID_VERSION` | `v7` | `v7` (time-ordered, better DB index locality) or `v4` (fully random), when `QZ_JOB_ID_TYPE=uuid` |
+| `QZ_API_ENABLED` | `false` | Expose the stateless Sanctum-protected API routes (`routes/api.php`) alongside the standard session-based ones |
+
+**Copy-paste block — every variable at its package default** (harmless to add as-is; edit only what you're actually changing):
 
 ```env
-# Default printer (optional)
-QZ_DEFAULT_PRINTER="HP LaserJet M404"
-
-# WebSocket connection (defaults to localhost:8181)
+QZ_DEFAULT_PRINTER=
 QZ_WEBSOCKET_HOST=localhost
 QZ_WEBSOCKET_PORT=8181
-
-# Auto-generate certificate on first boot (dev only)
 QZ_AUTO_GENERATE_CERT=false
-
-# Allow certificate generation via HTTP (security risk — keep false)
 QZ_ALLOW_PUBLIC_CERT_GENERATE=false
+QZ_LOGGING_ENABLED=false
+QZ_LOGGING_CHANNEL=stack
+QZ_LOGGING_LEVEL=info
+QZ_JOB_ID_TYPE=uuid
+QZ_UUID_VERSION=v7
+QZ_API_ENABLED=false
+```
 
-# Print job logging
+**A realistic production override** — name your printer, generate the cert once via `php artisan qz:generate-certificate` instead of auto-generating it, and turn on job logging:
+
+```env
+QZ_DEFAULT_PRINTER="HP LaserJet M404"
+QZ_AUTO_GENERATE_CERT=false
 QZ_LOGGING_ENABLED=true
 QZ_LOGGING_CHANNEL=daily
-QZ_LOGGING_LEVEL=info
-
-# qz_print_jobs primary key type — 'uuid' (default) or 'bigint'.
-# Read at migration time; set this BEFORE the first `php artisan migrate`.
-# See "Configuration Reference" below for the tradeoffs.
-QZ_JOB_ID_TYPE=uuid
-
-# UUID generation algorithm when QZ_JOB_ID_TYPE=uuid — 'v7' (default,
-# time-ordered, better DB index locality) or 'v4' (fully random, classic).
-QZ_UUID_VERSION=v7
-
-# Expose the stateless, Sanctum-protected API routes (routes/api.php) in
-# addition to the standard session-based web routes. Off by default.
-QZ_API_ENABLED=false
 ```
 
 ---
