@@ -157,14 +157,25 @@ class QzSecurityController extends Controller
         return (string) \Illuminate\Support\Str::uuid();
     }
 
-    private function isBigintOrUuid(?string $value): bool
+    /**
+     * v1.2.0: tenant_id (and the user morph columns) are now natively typed
+     * — uuid or unsignedBigInteger — matching config('qz-tray.id_type'),
+     * not a flexible string accepting either shape. So validation must be
+     * strict against whichever type is actually configured: a bigint-typed
+     * column will reject a uuid string just as hard as a real uuid column
+     * rejects a numeric one. This intentionally does NOT accept "either
+     * shape" anymore — that permissiveness only made sense when the
+     * column itself was an untyped string.
+     */
+    private function isValidTenantId(?string $value): bool
     {
         if ($value === null || $value === '') {
             return true; // nullable — handled by the 'nullable' rule, not here
         }
 
-        return (bool) preg_match('/^\d+$/', $value)
-            || (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value);
+        return config('qz-tray.id_type', 'uuid') === 'uuid'
+            ? (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value)
+            : (bool) preg_match('/^\d+$/', $value);
     }
 
     /**
@@ -175,9 +186,10 @@ class QzSecurityController extends Controller
      * used by setPrinter/getPrinter/clearCache (BUG recommendation #4 —
      * qz_printer_preferences is tenant-scoped too, not just qz_print_jobs).
      *
-     * Returns '' (not null) when there's genuinely no tenant, matching the
-     * qz_printer_preferences.tenant_id column default — see that
-     * migration's docblock for why NULL isn't used there.
+     * Returns null when there's genuinely no tenant or the value doesn't
+     * match config('qz-tray.id_type')'s shape — both tenant_id columns are
+     * nullable native types (uuid or unsignedBigInteger) as of v1.2.0, so
+     * null is always the correct "no tenant" value on either column type.
      */
     private function resolveTenantId(Request $request): ?string
     {
@@ -187,7 +199,7 @@ class QzSecurityController extends Controller
             $tenantId = call_user_func(config('qz-tray.tenant_id_resolver'), $request);
         }
 
-        if ($tenantId === null || ! $this->isBigintOrUuid((string) $tenantId)) {
+        if ($tenantId === null || ! $this->isValidTenantId((string) $tenantId)) {
             return null;
         }
 
@@ -225,19 +237,19 @@ class QzSecurityController extends Controller
             'path'       => 'required|string|max:500',
             'device_id'  => 'nullable|uuid',
             'tenant_id'  => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
-                if (! $this->isBigintOrUuid($value)) {
+                if (! $this->isValidTenantId($value)) {
                     $fail("The {$attribute} must be either an integer id or a UUID.");
                 }
             }],
             'project_id' => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
-                if (! $this->isBigintOrUuid($value)) {
+                if (! $this->isValidTenantId($value)) {
                     $fail("The {$attribute} must be either an integer id or a UUID.");
                 }
             }],
         ]);
 
         $identities = $this->resolveIdentities($request);
-        $tenantId   = $this->resolveTenantId($request) ?? '';
+        $tenantId   = $this->resolveTenantId($request);
 
         if (empty($identities)) {
             return response()->json([
@@ -263,14 +275,14 @@ class QzSecurityController extends Controller
             'printer'    => $validated['printer'],
             'path'       => $validated['path'],
             'scoped_to'  => array_keys($identities),
-            'tenant_id'  => $tenantId !== '' ? $tenantId : null,
+            'tenant_id'  => $tenantId,
         ]);
     }
 
     public function getPrinter(Request $request, string $path): \Illuminate\Http\JsonResponse
     {
         $identities = $this->resolveIdentities($request);
-        $tenantId   = $this->resolveTenantId($request) ?? '';
+        $tenantId   = $this->resolveTenantId($request);
         $priority   = config('qz-tray.identity_priority', ['device', 'user', 'session']);
 
         $printer = null;
@@ -323,7 +335,7 @@ class QzSecurityController extends Controller
                 ->where('identity_value', $value);
 
             if ($explicitTenant !== null) {
-                $query->where('tenant_id', $this->resolveTenantId($request) ?? '');
+                if ($tid = $this->resolveTenantId($request)) { $query->where('tenant_id', $tid); }
             }
 
             $deleted += $query->delete();
@@ -372,12 +384,12 @@ class QzSecurityController extends Controller
             // Accepted under either name: some host apps call it
             // "tenant_id", others "project_id" — same value, one column.
             'tenant_id'  => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
-                if (! $this->isBigintOrUuid($value)) {
+                if (! $this->isValidTenantId($value)) {
                     $fail("The {$attribute} must be either an integer id or a UUID.");
                 }
             }],
             'project_id' => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
-                if (! $this->isBigintOrUuid($value)) {
+                if (! $this->isValidTenantId($value)) {
                     $fail("The {$attribute} must be either an integer id or a UUID.");
                 }
             }],
@@ -408,13 +420,14 @@ class QzSecurityController extends Controller
         $type  = $request->input('type');
         $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
 
-        // Project/tenant id: explicit request value wins (bigint OR uuid,
-        // whichever the host app's project model uses — see the migration
-        // comment on the `tenant_id` column). If the host app didn't send
-        // one, fall back to an optional app-supplied resolver — useful for
-        // multi-tenant apps (e.g. stancl/tenancy) that want every print job
-        // auto-tagged with the current tenant without every call site
-        // having to pass it explicitly.
+        // Project/tenant id: explicit request value wins, validated against
+        // whichever type config('qz-tray.id_type') is currently set to
+        // (bigint or uuid — matches tenant_id's actual column type, see the
+        // migration). If the host app didn't send one, fall back to an
+        // optional app-supplied resolver — useful for multi-tenant apps
+        // (e.g. stancl/tenancy) that want every print job auto-tagged with
+        // the current tenant without every call site having to pass it
+        // explicitly.
         $tenantId = $this->resolveTenantId($request);
 
         // Persist to database when the qz_print_jobs table exists.
@@ -425,7 +438,7 @@ class QzSecurityController extends Controller
                 $user = $request->user();
                 $row = [
                     'tenant_id'     => $tenantId,
-                    'user_id'       => $user?->getAuthIdentifier(),
+                    'user_id'       => $user ? (string) $user->getAuthIdentifier() : null,
                     'user_type'     => $user ? get_class($user) : null,
                     'device_id'     => $deviceId,
                     'printer_name'  => $request->input('printer'),

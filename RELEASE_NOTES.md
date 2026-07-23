@@ -6,6 +6,59 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.2.0] — 2026-07-23
+
+> Design change, not a bug fix: `tenant_id` and `qz_print_jobs.user_id`/`user_type` are now natively typed (`uuid`/`unsignedBigInteger`) instead of plain strings, tied to `id_type` — on the explicit assumption that a project uses one PK convention throughout.
+
+### 🔄 Changed
+
+- **`tenant_id`** (both tables) and **`user_id`/`user_type`** (`qz_print_jobs`) now use `config('qz-tray.id_type')` directly — `$table->uuid(...)` / `nullableUuidMorphs('user')` when `id_type = 'uuid'`, `$table->unsignedBigInteger(...)` / `nullableMorphs('user')` when `'bigint'`. This replaces the v1.1.x approach (plain `string` columns, decoupled from `id_type`, accepting either shape).
+- **Why the change:** the string-based approach was more defensive (correct even if a single project mixed bigint tenants with uuid users), but that's not how this package is actually deployed — each project consistently uses one PK convention. Native typed columns are the better call in that (normal) case: proper indexing, smaller storage, and the option to add a real FK yourself if you want one. This does mean `id_type` must be set to match your project's actual convention — it's no longer inferred defensively; it's asserted.
+- **Validation is now mode-aware, not permissive.** `isBigintOrUuid()` (accepted either shape) is replaced by `isValidTenantId()`, which validates strictly against whichever type `id_type` is currently configured to. A bigint value submitted while `id_type=uuid` (or vice versa) is now a validation error, where before it would have been silently accepted.
+- **`qz_printer_preferences.tenant_id` lost its `''` "no tenant" sentinel.** A native `uuid` column can't hold `''` (Postgres rejects it as invalid format), so this reverts to nullable with no sentinel — meaning the composite unique index is a weaker safety net against a genuine race for single-tenant `uuid`-mode installs than the `''`-based v1.1.1–v1.1.9 design was. Documented as an accepted tradeoff, not silently dropped: `setPrinter()`/`getPrinter()` never relied on the DB constraint for correctness (always match on explicit `WHERE` conditions), so this doesn't change behavior in normal use.
+
+### ⬆️ Upgrade Notes
+
+Schema change to both tables (`tenant_id`, `user_id`, `user_type` all change column type). **Set `QZ_JOB_ID_TYPE` to match your project's actual PK convention before migrating** — see [Multi-Tenant Support](#multi-tenant-support) in the README.
+
+```bash
+php artisan migrate:rollback --step=2   # drops both qz tables
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-migrations --force
+php artisan migrate
+```
+
+---
+
+## [v1.1.9] — 2026-07-23
+
+> BUG-27: `user_id` was still bigint-locked despite BUG-12 claiming otherwise — a genuine gap in earlier work, surfaced by reviewing a proposed migration rewrite.
+
+### 🐛 Bug Fix
+
+- **`qz_print_jobs.user_id`** — BUG-12 (way back) replaced a hard `foreignId()->constrained()` FK with `nullableMorphs('user')` and documented it as working "with any primary key type." Verified that's false: Laravel's `nullableMorphs()` always produces `unsignedBigInteger` unless the host app sets `Schema::defaultMorphKeyType('uuid')` globally, which this package never required or could assume. So a UUID-keyed User model was silently still broken. Fixed by building `user_id`/`user_type` manually as plain nullable strings — the same approach already used for `tenant_id` — fully decoupled from any Laravel morph-type default. `QzSecurityController::print()` now explicitly casts the value to string on insert.
+- Also evaluated (and rejected) a proposed alternative that tied both `tenant_id` and the user morph's column type to `id_type` (this table's own PK config). That's a modeling error, not a fix — a host app's tenant/user PK types are unrelated to what type *this table's own* primary key is; conflating them would just relocate the bug to a different config combination (e.g. `QZ_JOB_ID_TYPE=uuid` on a bigint-tenant app would try to insert `"482"` into a native `uuid` column and fail). `tenant_id` stays a plain string on every install, independent of `id_type`, as it has been since BUG-24.
+
+### ⬆️ Upgrade Notes
+
+Schema change to `qz_print_jobs.user_id`/`user_type` (bigint → string). If already migrated:
+```bash
+php artisan migrate:rollback --step=1
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider" --tag=qz-migrations --force
+php artisan migrate
+```
+
+---
+
+## [v1.1.8] — 2026-07-23
+
+> FAQ clarification: how network/raw printers actually get registered.
+
+### 📚 Documentation
+
+- **"Can I print to a network printer?" FAQ answer was technically correct but imprecise** — said to use "the network printer's name as it appears in Windows/macOS printer settings," without explaining that QZ Tray has no printer list of its own (it reads the OS's), or that thermal/label printers usually need a **raw** TCP/IP port printer rather than the manufacturer's PostScript driver. Verified against QZ Industries' own setup tutorials (`qz.io/docs/setting-up-a-raw-printer-in-windows` / `-osx`) before rewriting — both confirm raw network printers are added as OS-level TCP/IP port printers, not accessed via some separate QZ Tray configuration.
+
+---
+
 ## [v1.1.7] — 2026-07-23
 
 > Migration fix: `qz_printer_preferences`' auto-named composite index exceeded MySQL's 64-character identifier limit.

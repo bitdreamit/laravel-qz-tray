@@ -177,8 +177,7 @@ Net effect: the switcher flashed open and closed in the same tick. Unusable.
 
 **Problem:** `foreignId('user_id')->constrained()` creates an `unsignedBigInteger` column and a FK to `users(id)`. On apps that use UUID or ULID primary keys for their User model (very common in modern Laravel apps), the FK constraint fails to create and the migration throws.
 
-**Fix:**
-- Replaced with `nullableMorphs('user')` which creates `user_id` (string, nullable) and `user_type` (string, nullable) columns plus a composite index. Works with any primary key type.
+**Fix (superseded — see BUG-27):** Replaced with `nullableMorphs('user')`. ~~Works with any primary key type.~~ **This claim was wrong** — `nullableMorphs()` still hardcodes `user_id` as `unsignedBigInteger` unless the host app sets `Schema::defaultMorphKeyType('uuid')` globally (confirmed against Laravel's own issue tracker, laravel/framework#27659), which this package can't assume. It fixed the FK-crash symptom (no more `constrained()`, so no FK to fail) but not the underlying UUID-user-id problem BUG-12 claimed to solve. See **BUG-27** for the actual fix.
 - Updated the index from `['user_id', 'status']` to `['user_id', 'user_type', 'status']`.
 - Updated `QzSecurityController::print()` to populate both `user_id` and `user_type` (via `get_class($user)`).
 
@@ -437,3 +436,19 @@ php artisan migrate
 2. **`identity_priority` = `device` first** is the right default for shared/kiosk workstations (your Mirth Connect PC → multi-analyzer topology) but wrong for apps where a person's printer choice should follow them between machines — flip the config to `['user', 'device', 'session']` for that case.
 3. **`qz_printer_preferences` rows are never pruned.** `printer_cache_duration` config still exists but nothing acts on it now that Cache TTL isn't the storage mechanism. Consider a scheduled command (`qz:prune-preferences --older-than=90`) if this matters for your retention policy.
 4. **`qz_printer_preferences` is not tenant-scoped.** Only `qz_print_jobs` got a `tenant_id` column in this pass. If two projects sharing one database also need isolated printer *memory* (not just job history), the same `tenant_id` (string, bigint-or-uuid) column should be added to `qz_printer_preferences` and folded into `resolveIdentities()`.
+
+*(Recommendations 1–4 above were later implemented — see the v1.1.2 entry in `RELEASE_NOTES.md`.)*
+
+---
+
+## BUG-27 — `nullableMorphs('user')` still hardcoded `user_id` as bigint; BUG-12 didn't actually fix what it claimed to (Medium)
+
+**File:** `database/migrations/2026_01_01_000000_create_qz_print_jobs_table.php`
+
+**Trigger:** reviewing a proposed rewrite of the printer-preferences/print-jobs migrations that tied `tenant_id`'s column type to `id_type` (this table's own PK config) — that particular idea was rejected (see below), but checking it required re-verifying `nullableMorphs()`'s actual behavior, which turned up this.
+
+**Problem:** BUG-12 replaced `foreignId('user_id')->constrained()` with `nullableMorphs('user')` and claimed the result "works with any primary key type." That's false. Per Laravel's own issue tracker (`laravel/framework#27659`), `nullableMorphs()` unconditionally generates `user_id` as `unsignedBigInteger` — the only way to get a UUID-compatible morph column is `nullableUuidMorphs()`, and the only way to make `nullableMorphs()` itself uuid-shaped is a global `Schema::defaultMorphKeyType('uuid')` call in the *host* app, which this package has no business assuming or requiring. So any app with a UUID-keyed User model was still broken — BUG-12 fixed the FK-constraint crash (by removing `constrained()`, there's no FK left to fail), but not the UUID-user-id case its own description claimed to solve.
+
+**Why the proposed fix (tying `user_id`'s type to `$usesUuid` / `id_type`) was rejected instead of adopted:** `id_type` controls this table's *own* primary key. A host app's User model PK type is a completely unrelated setting — an app could reasonably run `QZ_JOB_ID_TYPE=bigint` (this table's PK) while its own `users.id` is a UUID, or vice versa. Inferring one from the other is a modeling error, not a fix; it would just move the same class of bug to a different config combination instead of removing it. The same reasoning applies to `tenant_id`, which the proposed version also tied to `id_type` — rejected for the same reason, and additionally because a native `uuid` column (Postgres) or the `''`-for-no-tenant convention this package relies on elsewhere would break outright on a bigint tenant id being written into a `uuid`-typed column.
+
+**Fix:** Removed `nullableMorphs('user')` entirely. `user_id` and `user_type` are now built manually as plain nullable strings — the same approach already used for `tenant_id` since BUG-24, and deliberately independent of `id_type`. `QzSecurityController::print()`'s insert now explicitly casts `(string) $user->getAuthIdentifier()`, matching the column type regardless of whether the host app's User model uses an int, UUID, or ULID key.

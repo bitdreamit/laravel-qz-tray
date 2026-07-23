@@ -110,7 +110,7 @@ Browser  ──HTTP──►  Laravel App  ──WebSocket──►  QZ Tray (de
 | Requirement | Version |
 |-------------|---------|
 | PHP | 8.1 or higher |
-| Laravel | 10, 11,12 or 13  |
+| Laravel | 10, 11, or 12 |
 | PHP extension | `ext-openssl` (for certificate generation) |
 | QZ Tray (client) | 2.x — installed on each machine that prints |
 
@@ -311,10 +311,10 @@ return [
         'algorithm'     => 'sha256',
         'key_bits'      => 2048,
         'subject' => [
-            'countryName'      => 'BD',
-            'organizationName' => 'Bit Dream IT',
-            'commonName'       => 'Laravel QZ Tray',
-            'emailAddress'     => 'info@bitdreamit.com',
+            'countryName'      => 'US',
+            'organizationName' => 'My Company',
+            'commonName'       => 'My App QZ Tray',
+            'emailAddress'     => 'admin@myapp.com',
         ],
     ],
 
@@ -1294,8 +1294,8 @@ Every `POST /qz/print` request writes a row here (that's what `smart-print.js` c
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | `uuid` or `bigint` | Primary key — see [`id_type`](#configuration-reference) config. `uuid` (default) means the id is never a guessable sequential integer and is safe to return straight to the client; also the value `GET /qz/jobs`/`DELETE /qz/jobs/{id}` operate on. |
-| `tenant_id` | string, nullable | Bigint or UUID, stored as a string so it works with either — see [Multi-Tenant Support](#multi-tenant-support) below. |
-| `user_id` / `user_type` | nullable | Polymorphic (`nullableMorphs`) so it works with integer- or UUID-keyed user models. |
+| `tenant_id` | `uuid` or `bigint`, nullable | Type follows [`id_type`](#configuration-reference) — see [Multi-Tenant Support](#multi-tenant-support) below. |
+| `user_id` / `user_type` | `uuid`/`bigint` + string, nullable | `user_id`'s type also follows `id_type` (`nullableUuidMorphs()` or `nullableMorphs()`) — set `id_type` to match your User model's actual key type. |
 | `device_id` | uuid, nullable | The workstation/browser that submitted the job (`X-Device-Id` header — see `SmartPrint.getDeviceId()`). |
 | `printer_name` | string | Name of the printer used |
 | `document_url` | string, nullable | URL of the printed document |
@@ -1337,7 +1337,7 @@ Server-side backup for printer memory (the client-side source of truth is `local
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | bigint | Auto-increment primary key |
-| `tenant_id` | string | `''` when not applicable — deliberately not `null`; MySQL's unique index treats `NULL` as distinct-from-itself, which would silently stop enforcing uniqueness for the common single-tenant case if this were nullable |
+| `tenant_id` | `uuid` or `bigint`, nullable | Type follows [`id_type`](#configuration-reference), same as `qz_print_jobs.tenant_id`. Nullable with no sentinel value — see the note at the end of [Multi-Tenant Support](#multi-tenant-support) about the uniqueness-constraint tradeoff this implies. |
 | `identity_type` | string | `device`, `user`, or `session` — see [`identity_priority`](#configuration-reference) |
 | `identity_value` | string | The device UUID, user id, or session id |
 | `path` | string | The URL path the printer was remembered for |
@@ -1350,13 +1350,17 @@ Rows aren't pruned automatically — see [`qz:prune-preferences`](#artisan-comma
 
 ## Multi-Tenant Support
 
-Every table above is tenant-aware, and — critically — **doesn't assume your tenant/project model's primary key type**. Some apps key tenants by `bigint`, others by `uuid`; both work unmodified because `tenant_id` is stored as a string, validated as either shape:
+Every table above is tenant-aware. `tenant_id` (and `qz_print_jobs`' `user_id`/`user_type`) are **natively typed** — `uuid` or `unsignedBigInteger` — and follow [`id_type`](#configuration-reference): same setting, same convention, one config to change.
+
+> **This assumes your project uses one PK convention throughout** — if your tenant/project table and your User model are both `bigint`-keyed (or both `uuid`-keyed), set `id_type` to match and everything lines up with real, indexed, natively-typed columns instead of an untyped string. If a single project genuinely mixes a `bigint` tenant table with a `uuid`-keyed User model (or vice versa) — uncommon, but it happens — this config can only match one of them; you'd need to fork the migration for that specific column if you hit this.
 
 ```php
-// POST /qz/print, POST /qz/printer — either param name works, same column
+// POST /qz/print, POST /qz/printer — either param name works, same column.
+// Must match config('qz-tray.id_type') — a bigint value on a uuid-configured
+// install (or vice versa) fails validation.
 [
-    'tenant_id' => '482',                                     // bigint-keyed tenant, OR
-    'project_id' => 'b2b1f6c0-3b3d-4c9a-9e2e-1a2b3c4d5e6f',    // uuid-keyed tenant
+    'tenant_id' => '482',                                     // id_type = 'bigint'
+    'project_id' => 'b2b1f6c0-3b3d-4c9a-9e2e-1a2b3c4d5e6f',    // id_type = 'uuid'
 ]
 ```
 
@@ -1374,7 +1378,7 @@ Every table above is tenant-aware, and — critically — **doesn't assume your 
 
 ```php
 $jobs = DB::table('qz_print_jobs')
-    ->where('tenant_id', (string) auth()->user()->tenant_id)
+    ->where('tenant_id', auth()->user()->tenant_id)
     ->where('status', 'completed')
     ->orderByDesc('created_at')
     ->paginate(20);
@@ -1392,6 +1396,8 @@ $jobs = DB::table('qz_print_jobs')
 ```
 
 The `GET /qz/jobs` queue listing also narrows by tenant when one is present, on top of its existing per-device/per-user scoping — see [All Available Routes / API Endpoints](#all-available-routes--api-endpoints).
+
+**On `qz_printer_preferences` specifically:** its `tenant_id` is nullable (no default) regardless of `id_type`, and — unlike the earlier string-based version of this table — a native `uuid` column can't use an empty-string sentinel for "no tenant" (Postgres rejects `''` outright as invalid UUID format). This means the uniqueness constraint is a slightly weaker safety net for single-tenant `uuid`-mode installs than it was before: `setPrinter()`/`getPrinter()` always match on explicit conditions rather than relying on the DB constraint, so this doesn't affect correctness in normal use, only how hard the database itself guards against a genuine race condition.
 
 ---
 
@@ -1694,7 +1700,13 @@ SmartPrint.print('/invoices/' + $wire.invoiceId + '.pdf');
 ```
 
 **Q: Can I print to a network printer (not USB)?**
-A: Yes. QZ Tray supports network printers. Set the printer name to the network printer's name as it appears in Windows/macOS printer settings.
+A: Yes — both USB and network printers work the same way from this package's side, because QZ Tray doesn't maintain its own printer list at all. It reads whatever printers the **operating system** already has registered, and hands you that exact list via WebSocket (`SmartPrint.getPrinters()`). So "supported" really means "known to Windows/macOS/Linux":
+
+- **USB:** install the manufacturer's driver as normal. It shows up like any other local printer.
+- **Network (standard PDF/document printing):** add it in the OS as a network printer — e.g. Windows: *Add Printer → "The printer that I want isn't listed" → Add a printer using a TCP/IP address*, pointing at the printer's IP. macOS: *System Settings → Printers & Scanners → Add → IP*. Once it's in the OS printer list, it's in QZ Tray's list too — no separate configuration.
+- **Network thermal/label printers sending raw ZPL/ESC-POS** (the common case for the receipt/label printing this package is built for): same idea, but add it as a **raw/generic** printer over a **Standard TCP/IP Port** (Windows) or a **raw queue via CUPS `socket://`** (macOS/Linux) rather than the manufacturer's PostScript/graphics driver — QZ Industries has step-by-step tutorials for [Windows](https://qz.io/docs/setting-up-a-raw-printer-in-windows) and [macOS](https://qz.io/docs/setting-up-a-raw-printer-in-osx). Some drivers (e.g. Zebra ZDesigner) support both raw and standard printing in one driver — prefer that over the generic driver if available, since the generic raw driver can't print PDFs/images.
+
+Either way, once it's registered in the OS, use its exact OS-assigned name as the `printer` value — same as any USB printer.
 
 **Q: Is the private key secure?**
 A: Yes — the private key lives in `storage/qz/` which is not web-accessible. It is used only by PHP to sign requests, and is never sent to the client.
