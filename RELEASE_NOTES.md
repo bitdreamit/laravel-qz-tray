@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.1.7] — 2026-07-23
+
+> Migration fix: `qz_printer_preferences`' auto-named composite index exceeded MySQL's 64-character identifier limit.
+
+### 🐛 Bug Fix
+
+- **`2026_07_22_000000_create_qz_printer_preferences_table`** — `$table->index(['tenant_id', 'identity_type', 'identity_value'])` let Laravel auto-generate the index name, producing `qz_printer_preferences_tenant_id_identity_type_identity_value_index` (69 characters). MySQL's identifier limit is 64, so `php artisan migrate` failed with `SQLSTATE[42000]: ... 1059 Identifier name ... is too long` — the table was never created. The table's own unique constraint was already given an explicit short name (`qz_pref_tenant_identity_path_unique`) for the same reason; this index just wasn't. Fixed by explicitly naming it `qz_pref_tenant_identity_idx` (27 characters). `qz_print_jobs`' indexes were checked too — its shorter table name keeps every auto-generated index name under the limit already, no change needed there.
+
+### ⬆️ Upgrade Notes
+
+If your `qz_printer_preferences` migration failed with this error, it means the table doesn't exist yet — just re-publish and re-run:
+```bash
+php artisan vendor:publish --tag=qz-migrations --force
+php artisan migrate
+```
+
+---
+
 ## [v1.1.6] — 2026-07-23
 
 > Environment Variables Reference was showing misleading defaults.
