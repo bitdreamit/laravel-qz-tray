@@ -7,8 +7,8 @@ return [
     |--------------------------------------------------------------------------
     */
     'cert_path' => storage_path('qz/digital-certificate.txt'),
-    'key_path'  => storage_path('qz/private-key.pem'),
-    'cert_ttl'  => 3600,
+    'key_path' => storage_path('qz/private-key.pem'),
+    'cert_ttl' => 3600,
 
     /*
     |--------------------------------------------------------------------------
@@ -17,20 +17,20 @@ return [
     */
     'certificate' => [
         'validity_days' => 7300,
-        'algorithm'     => 'sha256',
-        'key_bits'      => 2048,
+        'algorithm' => 'sha256',
+        'key_bits' => 2048,
         // Use integer 0 (= OPENSSL_KEYTYPE_RSA) so the config can be cached
         // via `php artisan config:cache` even when the openssl extension is
         // not loaded at cache time. OPENSSL_KEYTYPE_RSA === 0.
-        'key_type'      => 0,
+        'key_type' => 0,
         'subject' => [
-            'countryName'            => 'BD',
-            'stateOrProvinceName'    => 'Rangpur',
-            'localityName'           => 'Rangpur',
-            'organizationName'       => 'Bit Dream IT',
+            'countryName' => 'BD',
+            'stateOrProvinceName' => 'Rangpur',
+            'localityName' => 'Rangpur',
+            'organizationName' => 'Bit Dream IT',
             'organizationalUnitName' => 'Bit Dream IT',
-            'commonName'             => 'Laravel QZ Tray',
-            'emailAddress'           => 'info@bitdreamit.com',
+            'commonName' => 'Laravel QZ Tray',
+            'emailAddress' => 'info@bitdreamit.com',
         ],
     ],
 
@@ -56,10 +56,10 @@ return [
     | Printer Settings
     |--------------------------------------------------------------------------
     */
-    'default_printer'            => env('QZ_DEFAULT_PRINTER'),
-    'allow_printer_switch'       => true,
-    'remember_printer_per_page'  => true,
-    'printer_cache_duration'     => 86400,
+    'default_printer' => env('QZ_DEFAULT_PRINTER'),
+    'allow_printer_switch' => true,
+    'remember_printer_per_page' => true,
+    'printer_cache_duration' => 86400,
 
     /*
     |--------------------------------------------------------------------------
@@ -151,8 +151,8 @@ return [
     | Default port is 8181 (QZ Tray default).
     */
     'websocket' => [
-        'host'    => env('QZ_WEBSOCKET_HOST', 'localhost'),
-        'port'    => env('QZ_WEBSOCKET_PORT', 8181),
+        'host' => env('QZ_WEBSOCKET_HOST', 'localhost'),
+        'port' => env('QZ_WEBSOCKET_PORT', 8181),
         'retries' => 1,
         'timeout' => 10,
     ],
@@ -163,9 +163,9 @@ return [
     |--------------------------------------------------------------------------
     */
     'fallback' => [
-        'enabled'         => true,
+        'enabled' => true,
         'open_in_new_tab' => true,
-        'show_warning'    => true,
+        'show_warning' => true,
     ],
 
     /*
@@ -174,8 +174,8 @@ return [
     |--------------------------------------------------------------------------
     */
     'hotkey' => [
-        'enabled'             => true,
-        'combination'         => 'ctrl+shift+p',
+        'enabled' => true,
+        'combination' => 'ctrl+shift+p',
         'require_confirmation' => false,
     ],
 
@@ -185,14 +185,14 @@ return [
     |--------------------------------------------------------------------------
     */
     'routes' => [
-        'prefix'     => 'qz',
+        'prefix' => 'qz',
         'middleware' => ['web'],
-        'throttle'   => '60,1',
+        'throttle' => '60,1',
         // API routes (routes/api.php) are disabled by default. Enable only
         // when you need a stateless, sanctum-protected surface.
         'api' => [
-            'enabled'    => env('QZ_API_ENABLED', false),
-            'prefix'     => 'api/qz',
+            'enabled' => env('QZ_API_ENABLED', false),
+            'prefix' => 'api/qz',
             'middleware' => ['auth:sanctum', 'throttle:60,1'],
         ],
     ],
@@ -205,7 +205,7 @@ return [
     'logging' => [
         'enabled' => env('QZ_LOGGING_ENABLED', false),
         'channel' => env('QZ_LOGGING_CHANNEL', 'stack'),
-        'level'   => env('QZ_LOGGING_LEVEL', 'info'),
+        'level' => env('QZ_LOGGING_LEVEL', 'info'),
     ],
 
     /*
@@ -215,7 +215,7 @@ return [
     */
     'installers' => [
         'windows' => 'qz-tray-windows.exe',
-        'linux'   => 'qz-tray-linux.deb',
-        'macos'   => 'qz-tray-macos.pkg',
+        'linux' => 'qz-tray-linux.deb',
+        'macos' => 'qz-tray-macos.pkg',
     ],
 ];
