@@ -1,9 +1,9 @@
 # Laravel QZ Tray
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012|%2013-FF2D20?style=for-the-badge&logo=laravel&logoColor=white" alt="Laravel">
+  <img src="https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012%20|%2013-FF2D20?style=for-the-badge&logo=laravel&logoColor=white" alt="Laravel">
   <img src="https://img.shields.io/badge/PHP-8.1%2B-777BB4?style=for-the-badge&logo=php&logoColor=white" alt="PHP">
-  <img src="https://img.shields.io/badge/QZ%20Tray-2.x-0078D4?style=for-the-badge" alt="QZ Tray">
+  <img src="https://img.shields.io/badge/QZ%20Tray-2.2.6-0078D4?style=for-the-badge" alt="QZ Tray">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -11,8 +11,29 @@
 
 ---
 
+## Quick Start
+
+For the impatient — five commands to a working test print. Every step is explained in full further down; this is just the fast path.
+
+```bash
+composer require bitdreamit/laravel-qz-tray
+php artisan qz:install          # publishes config, migrations, views, JS/CSS assets, generates your cert
+php artisan migrate             # creates qz_print_jobs + qz_printer_preferences
+```
+
+Add the CSRF meta tag and two `<script>` tags to your layout (see [Step 4](#step-4--add-scripts-to-your-layout) for the exact snippet), install [QZ Tray](https://qz.io/download) on the machine that will physically print, then visit:
+
+```
+/qz/smart
+```
+
+That page shows live connection status, lets you pick a printer, and print a real test job. If it prints, you're done — jump to [Frontend Usage](#frontend-usage--smartprint-js) for how to wire it into your own pages.
+
+---
+
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [What is This?](#what-is-this)
 - [Requirements](#requirements)
 - [Installation — Step by Step](#installation--step-by-step)
@@ -22,6 +43,7 @@
   - [Step 4 — Add Scripts to Your Layout](#step-4--add-scripts-to-your-layout)
   - [Step 5 — Install QZ Tray on Client Machines](#step-5--install-qz-tray-on-client-machines)
   - [Step 6 — Verify Everything Works](#step-6--verify-everything-works)
+- [Publishing Assets — Manual Control](#publishing-assets--manual-control)
 - [Configuration Reference](#configuration-reference)
 - [Certificate Management](#certificate-management)
 - [Artisan Commands](#artisan-commands)
@@ -85,11 +107,11 @@ Browser  ──HTTP──►  Laravel App  ──WebSocket──►  QZ Tray (de
 
 ## Requirements
 
-| Requirement | Version                                     |
-|-------------|---------------------------------------------|
-| PHP | 8.1 or higher                               |
-| Laravel | 10, 11, 12 or 13                            |
-| PHP extension | `ext-openssl` (for certificate generation)  |
+| Requirement | Version |
+|-------------|---------|
+| PHP | 8.1 or higher |
+| Laravel | 10, 11, or 12 |
+| PHP extension | `ext-openssl` (for certificate generation) |
 | QZ Tray (client) | 2.x — installed on each machine that prints |
 
 > **Note:** QZ Tray must be installed on every **client machine** (the computer connected to the printer). It does NOT need to be on your server.
@@ -243,6 +265,34 @@ After installing, QZ Tray starts automatically with Windows/macOS and runs in th
 
 ---
 
+## Publishing Assets — Manual Control
+
+`php artisan qz:install` (Step 2 above) runs every publish group at once plus generates a certificate — the right choice for a first install. Reach for the individual `vendor:publish` commands below when you want more control: republishing only the config after an update, keeping generated views out of a CI pipeline, or a Docker build step that shouldn't touch `storage/`.
+
+| Tag | Command | Publishes | Destination |
+|-----|---------|-----------|-------------|
+| `qz-config` | `php artisan vendor:publish --tag=qz-config` | `config/qz-tray.php` | `config/qz-tray.php` |
+| `qz-migrations` | `php artisan vendor:publish --tag=qz-migrations` | `qz_print_jobs` + `qz_printer_preferences` migrations | `database/migrations/` |
+| `qz-blade` | `php artisan vendor:publish --tag=qz-blade` | Demo/test Blade views (`smart.blade.php`, `default.blade.php`, `example.blade.php`) | `resources/views/vendor/qz-tray/` |
+| `qz-assets` | `php artisan vendor:publish --tag=qz-assets` | `smart-print.js`, `printer-switcher.js`, `printer-status.js`, adapters, the vendored `qz-tray.js`, CSS, fonts | `public/vendor/qz-tray/` |
+| `qz-installers` | `php artisan vendor:publish --tag=qz-installers` | QZ Tray desktop installers (Windows/macOS/Linux), if bundled | `public/vendor/qz-tray/installers/` |
+
+Publish everything at once without the installer command's certificate-generation step:
+
+```bash
+php artisan vendor:publish --provider="Bitdreamit\QzTray\QzTrayServiceProvider"
+```
+
+Add `--force` to any of the above to overwrite files you've already published (e.g. after upgrading the package and wanting the latest `smart-print.js`):
+
+```bash
+php artisan vendor:publish --tag=qz-assets --force
+```
+
+> **After publishing `qz-assets`, re-run `php artisan migrate` if you also re-published `qz-migrations`** — publishing only copies the migration file into your app; it doesn't run it.
+
+---
+
 ## Configuration Reference
 
 After publishing, edit `config/qz-tray.php`:
@@ -261,10 +311,10 @@ return [
         'algorithm'     => 'sha256',
         'key_bits'      => 2048,
         'subject' => [
-            'countryName'      => 'BD',
-            'organizationName' => 'Bit Dream IT',
-            'commonName'       => 'Laravel QZ Tray',
-            'emailAddress'     => 'info@bitdreamit.com',
+            'countryName'      => 'US',
+            'organizationName' => 'My Company',
+            'commonName'       => 'My App QZ Tray',
+            'emailAddress'     => 'admin@myapp.com',
         ],
     ],
 
@@ -432,15 +482,26 @@ php artisan qz:generate-certificate --force
 
 | Command | Description |
 |---------|-------------|
-| `php artisan qz:install` | Full install: publish + generate cert |
+| `php artisan qz:install` | Full install: publish everything + generate cert |
 | `php artisan qz:install --force` | Re-install, overwrite existing files |
 | `php artisan qz:install --no-cert` | Install without generating a certificate |
 | `php artisan qz:generate-certificate` | Generate SSL certificate |
 | `php artisan qz:generate-certificate --force` | Force regenerate certificate |
 | `php artisan qz:generate-certificate --show` | Show certificate details |
-| `php artisan qz:clear-cache` | Clear printer cache entries |
-| `php artisan qz:clear-cache --session` | Also clear session printer data |
-| `php artisan qz:clear-cache --all` | Clear everything |
+| `php artisan qz:clear-cache` | Clear stored printer preferences (`qz_printer_preferences` table) for the requesting identity |
+| `php artisan qz:clear-cache --session` | Also clear session-scoped printer data |
+| `php artisan qz:clear-cache --all` | Clear everything, including session data |
+| `php artisan qz:prune-preferences` | Delete `qz_printer_preferences` rows not updated in the last 90 days (default) |
+| `php artisan qz:prune-preferences --older-than=30` | Custom age threshold, in days |
+| `php artisan qz:prune-preferences --type=session` | Only prune one identity type (`device`, `user`, or `session`) |
+| `php artisan qz:prune-preferences --dry-run` | Preview what would be deleted, without deleting it |
+
+`qz:prune-preferences` isn't scheduled automatically — the `qz_printer_preferences` table (unlike the old Cache-backed printer memory) doesn't expire on its own. Wire it into your scheduler if row growth matters for your install:
+
+```php
+// routes/console.php (Laravel 11+) or app/Console/Kernel.php's schedule() method
+Schedule::command('qz:prune-preferences --older-than=90')->weekly();
+```
 
 ---
 
@@ -1224,45 +1285,41 @@ return redirect()->route('orders.show', $order)
 
 ## Database — Print Job Logging
 
-The `qz_print_jobs` table (created by the migration) lets you log every print job.
+Two tables ship with this package. Both are optional — the package works with neither migrated (job logging and server-synced printer memory just silently no-op), but you'll want both for anything beyond a single-page demo.
 
-**Schema:**
+### `qz_print_jobs`
+
+Every `POST /qz/print` request writes a row here (that's what `smart-print.js` calls internally after each successful `qz.print()` — see [Full SmartPrint API Reference](#full-smartprint-api-reference)). You don't need to write to it manually.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | bigint | Auto-increment primary key |
-| `tenant_id` | bigint (nullable) | For multi-tenant apps |
-| `user_id` | bigint (nullable) | FK to `users` table |
+| `id` | `uuid` or `bigint` | Primary key — see [`id_type`](#configuration-reference) config. `uuid` (default) means the id is never a guessable sequential integer and is safe to return straight to the client; also the value `GET /qz/jobs`/`DELETE /qz/jobs/{id}` operate on. |
+| `tenant_id` | string, nullable | Bigint or UUID, stored as a string so it works with either — see [Multi-Tenant Support](#multi-tenant-support) below. |
+| `user_id` / `user_type` | nullable | Polymorphic (`nullableMorphs`) so it works with integer- or UUID-keyed user models. |
+| `device_id` | uuid, nullable | The workstation/browser that submitted the job (`X-Device-Id` header — see `SmartPrint.getDeviceId()`). |
 | `printer_name` | string | Name of the printer used |
-| `document_url` | string | URL of the printed document |
-| `document_type` | string | `pdf`, `zpl`, `escpos`, `raw` |
+| `document_url` | string, nullable | URL of the printed document |
+| `document_type` | string | `pdf`, `zpl`, `escpos`, `raw`, `html` |
 | `copies` | int | Number of copies |
-| `status` | string | `pending`, `processing`, `completed`, `failed` |
-| `metadata` | JSON (nullable) | Any extra data |
-| `processed_at` | timestamp | When the job was sent to QZ Tray |
-| `created_at` | timestamp | When the job was created |
-| `updated_at` | timestamp | Last update |
+| `status` | string | `pending`, `processing`, `completed`, `failed`, `cancelled` |
+| `error_message` | text, nullable | Populated when a job fails |
+| `metadata` | JSON, nullable | Any extra data |
+| `processed_at` | timestamp, nullable | When the job was completed/cancelled |
+| `created_at` / `updated_at` | timestamp | Standard Eloquent timestamps |
 
-**Example: Log a print job in your controller:**
+**Querying your own job history:**
 
 ```php
 use Illuminate\Support\Facades\DB;
 
-DB::table('qz_print_jobs')->insert([
-    'user_id'      => auth()->id(),
-    'printer_name' => $request->input('printer'),
-    'document_url' => $request->input('url'),
-    'document_type'=> $request->input('type', 'pdf'),
-    'copies'       => $request->input('copies', 1),
-    'status'       => 'completed',
-    'metadata'     => json_encode(['order_id' => $orderId]),
-    'processed_at' => now(),
-    'created_at'   => now(),
-    'updated_at'   => now(),
-]);
+$jobs = DB::table('qz_print_jobs')
+    ->where('user_id', auth()->id())
+    ->where('status', 'completed')
+    ->orderByDesc('created_at')
+    ->paginate(20);
 ```
 
-**Enable logging via the built-in print endpoint:**
+**Enable request-level logging** (separate from the DB rows above — this writes to your Laravel log file, not the database):
 
 ```php
 // config/qz-tray.php
@@ -1273,22 +1330,68 @@ DB::table('qz_print_jobs')->insert([
 ],
 ```
 
-When logging is enabled, every `POST /qz/print` request is written to your Laravel log.
+### `qz_printer_preferences`
+
+Server-side backup for printer memory (the client-side source of truth is `localStorage`; this table exists so a cleared browser profile or a fresh browser on the same physical workstation can pick its printer back up — see [Printer Switcher Modal](#printer-switcher-modal)). One row per `(tenant_id, identity_type, identity_value, path)` combination.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | bigint | Auto-increment primary key |
+| `tenant_id` | string | `''` when not applicable — deliberately not `null`; MySQL's unique index treats `NULL` as distinct-from-itself, which would silently stop enforcing uniqueness for the common single-tenant case if this were nullable |
+| `identity_type` | string | `device`, `user`, or `session` — see [`identity_priority`](#configuration-reference) |
+| `identity_value` | string | The device UUID, user id, or session id |
+| `path` | string | The URL path the printer was remembered for |
+| `printer_name` | string | The remembered printer |
+| `created_at` / `updated_at` | timestamp | Standard Eloquent timestamps |
+
+Rows aren't pruned automatically — see [`qz:prune-preferences`](#artisan-commands) in Artisan Commands.
 
 ---
 
 ## Multi-Tenant Support
 
-The `qz_print_jobs` table has a `tenant_id` column for multi-tenant applications.
+Every table above is tenant-aware, and — critically — **doesn't assume your tenant/project model's primary key type**. Some apps key tenants by `bigint`, others by `uuid`; both work unmodified because `tenant_id` is stored as a string, validated as either shape:
 
 ```php
-// Filter print jobs by tenant
+// POST /qz/print, POST /qz/printer — either param name works, same column
+[
+    'tenant_id' => '482',                                     // bigint-keyed tenant, OR
+    'project_id' => 'b2b1f6c0-3b3d-4c9a-9e2e-1a2b3c4d5e6f',    // uuid-keyed tenant
+]
+```
+
+**Auto-tagging every request without passing it at every call site** — set a resolver once in config, used only when the request doesn't supply `tenant_id`/`project_id` explicitly:
+
+```php
+// config/qz-tray.php
+'tenant_id_resolver' => fn ($request) => auth()->user()?->tenant_id,
+
+// or for a package like stancl/tenancy:
+'tenant_id_resolver' => fn ($request) => tenant('id'),
+```
+
+**Filtering print jobs by tenant:**
+
+```php
 $jobs = DB::table('qz_print_jobs')
-    ->where('tenant_id', auth()->user()->tenant_id)
+    ->where('tenant_id', (string) auth()->user()->tenant_id)
     ->where('status', 'completed')
     ->orderByDesc('created_at')
     ->paginate(20);
 ```
+
+**Scoping printer memory to a tenant too** (not just job history) — pass the same `tenant_id`/`project_id` on `POST /qz/printer`, or set it once page-wide from your Blade layout so `smart-print.js` sends it automatically on every printer-memory and job-logging call:
+
+```html
+<script>
+    window.QZ_CONFIG = {
+        tenantId: '{{ auth()->user()?->tenant_id }}',
+        // or: projectId: '{{ $project->id }}'
+    };
+</script>
+```
+
+The `GET /qz/jobs` queue listing also narrows by tenant when one is present, on top of its existing per-device/per-user scoping — see [All Available Routes / API Endpoints](#all-available-routes--api-endpoints).
 
 ---
 
@@ -1358,6 +1461,19 @@ QZ_ALLOW_PUBLIC_CERT_GENERATE=false
 QZ_LOGGING_ENABLED=true
 QZ_LOGGING_CHANNEL=daily
 QZ_LOGGING_LEVEL=info
+
+# qz_print_jobs primary key type — 'uuid' (default) or 'bigint'.
+# Read at migration time; set this BEFORE the first `php artisan migrate`.
+# See "Configuration Reference" below for the tradeoffs.
+QZ_JOB_ID_TYPE=uuid
+
+# UUID generation algorithm when QZ_JOB_ID_TYPE=uuid — 'v7' (default,
+# time-ordered, better DB index locality) or 'v4' (fully random, classic).
+QZ_UUID_VERSION=v7
+
+# Expose the stateless, Sanctum-protected API routes (routes/api.php) in
+# addition to the standard session-based web routes. Off by default.
+QZ_API_ENABLED=false
 ```
 
 ---
@@ -1436,6 +1552,7 @@ php artisan qz:generate-certificate --force
 
 ```bash
 php artisan qz:clear-cache --all
+php artisan qz:prune-preferences --older-than=0   # delete every stored printer preference, not just this identity's
 php artisan cache:clear
 php artisan config:clear
 ```
@@ -1458,7 +1575,8 @@ your-laravel-app/
 │
 ├── database/
 │   └── migrations/
-│       └── ..._create_qz_print_jobs_table.php
+│       ├── ..._create_qz_print_jobs_table.php
+│       └── ..._create_qz_printer_preferences_table.php
 │
 ├── resources/
 │   └── views/
@@ -1495,12 +1613,13 @@ src/
 ├── QzTrayServiceProvider.php           ← Registers routes, commands, views
 ├── Http/
 │   └── Controllers/
-│       └── QzSecurityController.php    ← All 19 route handlers
+│       └── QzSecurityController.php    ← All route handlers (security, printers, jobs, cache)
 └── Console/
     └── Commands/
         ├── InstallQzTray.php           ← php artisan qz:install
         ├── GenerateCertificate.php     ← php artisan qz:generate-certificate
-        └── ClearQzCache.php            ← php artisan qz:clear-cache
+        ├── ClearQzCache.php            ← php artisan qz:clear-cache
+        └── PrunePreferences.php        ← php artisan qz:prune-preferences
 ```
 
 ---

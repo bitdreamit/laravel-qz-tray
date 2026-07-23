@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.1.5] — 2026-07-23
+
+> README overhaul — fixes several real gaps flagged during review, not just cosmetic cleanup.
+
+### 📚 Documentation
+
+- **Added "Publishing Assets — Manual Control"** — a full table of every `vendor:publish --tag=...` (`qz-config`, `qz-migrations`, `qz-blade`, `qz-assets`, `qz-installers`) was entirely missing. Previously the README only documented the all-in-one `qz:install` command, leaving no path for selective/manual publishing (re-publishing just `qz-assets` after an upgrade, keeping demo views out of a CI build, etc.).
+- **Added Quick Start** — a 5-command fast path at the top for experienced developers, before the full step-by-step walkthrough.
+- **Fixed `qz_print_jobs` schema table** — still showed the pre-1.1 shape (`tenant_id: bigint`, no `device_id`, no `error_message`, `uuid` column that no longer exists post-BUG-25). Now matches the actual migration.
+- **Rewrote "Multi-Tenant Support"** — previously only mentioned `tenant_id` as a bare bigint column with one query example. Now documents the actual dual bigint/uuid support, `tenant_id_resolver` config, and `window.QZ_CONFIG.tenantId` page-wide default — none of which were mentioned anywhere in the README despite existing since v1.1.1/v1.1.2.
+- **Added `qz_printer_preferences` table docs** — the table introduced in v1.1.0 (BUG-19) had no README coverage at all.
+- **Fixed Artisan Commands table** — `qz:prune-preferences` (added v1.1.2) was completely missing; `qz:clear-cache`'s description still described the pre-1.1.0 Cache-based behavior instead of what it does now (clear `qz_printer_preferences` rows).
+- **Fixed Environment Variables Reference** — `QZ_JOB_ID_TYPE`, `QZ_UUID_VERSION`, `QZ_API_ENABLED` all exist in `config/qz-tray.php` via `env()` but weren't listed.
+- **Fixed File Structure diagram** — missing the `qz_printer_preferences` migration and `PrunePreferences.php`; corrected a stale "19 route handlers" comment that no longer matched the controller.
+- Badges: added Laravel 13, pinned the QZ Tray badge to `2.2.6` instead of the vague `2.x`.
+
+---
+
 ## [v1.1.4] — 2026-07-23
 
 > Laravel 13 support, and the vendored `qz-tray.js` now genuinely runs 2.2.6 (not just a relabeled 2.2.5).
