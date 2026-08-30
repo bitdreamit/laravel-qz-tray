@@ -4,6 +4,21 @@
     <meta name="csrf-token" content="{{ csrf_token() }}">
 
     <title>QZ Tray Sample Page</title>
+
+    <script>
+        {{-- AUDIT H2: bridge server-side package config to the client. This
+        demo page previously hardcoded /qz/certificate and /qz/sign, which
+        broke the moment the host app changed routes.prefix. --}}
+        window.QZ_CONFIG = {
+            prefix: '{{ config('qz-tray.routes.prefix', 'qz') }}',
+            uuidVersion: '{{ config('qz-tray.uuid_version', 'v7') }}',
+            serverSync: {{ config('qz-tray.server_sync', true) ? 'true' : 'false' }},
+        };
+        (function () {
+            var base = '/' + String(window.QZ_CONFIG.prefix).replace(/^\/+|\/+$/g, '');
+            window.QZ_ENDPOINTS = { certificate: base + '/certificate', sign: base + '/sign' };
+        })();
+    </script>
 </head>
 
 <!-- Required scripts -->
@@ -1386,7 +1401,7 @@
 <script>
     /// Authentication setup ///
     qz.security.setCertificatePromise(function (resolve, reject) {
-        fetch('/qz/certificate', {
+        fetch(window.QZ_ENDPOINTS.certificate, {
             cache: 'no-store',
             headers: { 'Content-Type': 'text/plain' }
         })
@@ -1407,7 +1422,7 @@
 
     qz.security.setSignaturePromise(function (toSign) {
         return function (resolve, reject) {
-            fetch('/qz/sign', {
+            fetch(window.QZ_ENDPOINTS.sign, {
                 method: 'POST',
                 cache: 'no-store',
                 headers: {

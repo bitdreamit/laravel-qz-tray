@@ -1,0 +1,22 @@
+# Dependencies
+/vendor
+/node_modules
+
+# Test & coverage artifacts
+/coverage
+.phpunit.result.cache
+/.phpunit.cache
+
+# IDE / OS noise
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Build outputs
+*.log

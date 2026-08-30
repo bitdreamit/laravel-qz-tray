@@ -47,7 +47,14 @@ return [
     |--------------------------------------------------------------------------
     | Allow Public Certificate Generation via HTTP
     |--------------------------------------------------------------------------
-    | Disabled by default for security. Only enable in a secured context.
+    | Disabled by default for security.
+    |
+    | AUDIT M12 WARNING: when enabled, ANY visitor can regenerate the
+    | certificate — rotating the keypair, invalidating every workstation's
+    | stored trust, and opening a denial-of-service lever with no
+    | authentication gate. If you must enable it, protect the route with
+    | auth middleware via your route/middleware overrides, and prefer
+    | removing this endpoint entirely in a future major release.
     */
     'allow_public_cert_generate' => env('QZ_ALLOW_PUBLIC_CERT_GENERATE', false),
 
@@ -60,6 +67,11 @@ return [
     'allow_printer_switch'       => true,
     'remember_printer_per_page'  => true,
     'printer_cache_duration'     => 86400,
+    // v1.2.1: explicit switch for the server-side half of printer memory
+    // (the POST/GET /qz/printer round-trip smart-print.js performs). The JS
+    // reads this through window.QZ_CONFIG.serverSync — previously it was
+    // opt-out only via a JS flag no view ever set (AUDIT M5).
+    'server_sync'                => env('QZ_SERVER_SYNC', true),
 
     /*
     |--------------------------------------------------------------------------

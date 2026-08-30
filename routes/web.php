@@ -30,6 +30,13 @@ Route::group([
     Route::post('/printer', [QzSecurityController::class, 'setPrinter'])
         ->name('qz.printer.set');
 
+    // AUDIT H3: query-param variant of /printer/{path}. The segment version
+    // breaks on Apache when the path contains encoded slashes (%2F) — Apache
+    // rejects them by default with a 404 — so the client now sends the page
+    // path as ?path=. The original segment route is kept for compatibility.
+    Route::get('/printer', [QzSecurityController::class, 'getPrinterByQuery'])
+        ->name('qz.printer.get.query');
+
     Route::get('/printer/{path}', [QzSecurityController::class, 'getPrinter'])
         ->where('path', '.*')
         ->name('qz.printer.get');
@@ -40,6 +47,11 @@ Route::group([
 
     Route::get('/jobs', [QzSecurityController::class, 'jobs'])
         ->name('qz.jobs');
+
+    // AUDIT C2: dedicated job-status updates (processing/completed/failed)
+    // so the client no longer has to replay POST /qz/print to change state.
+    Route::patch('/jobs/{id}', [QzSecurityController::class, 'updateJobStatus'])
+        ->name('qz.jobs.status');
 
     Route::delete('/jobs/{id}', [QzSecurityController::class, 'cancelJob'])
         ->name('qz.jobs.cancel');

@@ -35,6 +35,10 @@ Route::group([
     Route::get('/jobs', [QzSecurityController::class, 'jobs'])
         ->name('api.qz.jobs');
 
+    // AUDIT C2: job-status updates (parity with the web surface).
+    Route::patch('/jobs/{id}', [QzSecurityController::class, 'updateJobStatus'])
+        ->name('api.qz.jobs.status');
+
     Route::delete('/jobs/{id}', [QzSecurityController::class, 'cancelJob'])
         ->name('api.qz.jobs.cancel');
 

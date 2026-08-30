@@ -3,7 +3,6 @@
 namespace Bitdreamit\QzTray\Http\Controllers;
 
 use Illuminate\Http\Request;
-use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -96,7 +95,7 @@ class QzSecurityController extends Controller
                 'certificate' => url("/{$prefix}/certificate"),
                 'sign'        => url("/{$prefix}/sign"),
             ],
-            'version'   => '1.0.0',
+            'version'   => \Bitdreamit\QzTray\QzTrayServiceProvider::VERSION, // was hardcoded '1.0.0' (AUDIT M1)
             'timestamp' => now()->toIso8601String(),
         ]);
     }
@@ -173,9 +172,21 @@ class QzSecurityController extends Controller
             return true; // nullable — handled by the 'nullable' rule, not here
         }
 
-        return config('qz-tray.id_type', 'uuid') === 'uuid'
-            ? (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value)
-            : (bool) preg_match('/^\d+$/', $value);
+        if (config('qz-tray.id_type', 'uuid') === 'uuid') {
+            return (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value);
+        }
+
+        // AUDIT M4: bound numeric ids to the unsigned BIGINT range. The old
+        // bare '^\d+$' accepted '99999999999999999999' (21 digits), which
+        // sailed through validation and then exploded inside the INSERT with
+        // an out-of-range error — turning a clean 422 into a 500 on
+        // setPrinter(). 18446744073709551615 is PHP_INT_MAX * 2 + 1.
+        if (! preg_match('/^\d{1,20}$/', $value)) {
+            return false;
+        }
+
+        return strlen($value) < 20
+            || (strlen($value) === 20 && strcmp($value, '18446744073709551615') <= 0);
     }
 
     /**
@@ -248,6 +259,16 @@ class QzSecurityController extends Controller
             }],
         ]);
 
+        // AUDIT H4: print()/jobs()/cancelJob() degraded gracefully when the
+        // package migrations had not been run, but setPrinter() hit the
+        // missing table directly and surfaced a raw QueryException 500.
+        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_printer_preferences')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'qz_printer_preferences table not migrated. Run: php artisan migrate',
+            ], 503);
+        }
+
         $identities = $this->resolveIdentities($request);
         $tenantId   = $this->resolveTenantId($request);
 
@@ -281,6 +302,14 @@ class QzSecurityController extends Controller
 
     public function getPrinter(Request $request, string $path): \Illuminate\Http\JsonResponse
     {
+        // AUDIT H4: consistent graceful degradation (see setPrinter()).
+        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_printer_preferences')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'qz_printer_preferences table not migrated. Run: php artisan migrate',
+            ], 503);
+        }
+
         $identities = $this->resolveIdentities($request);
         $tenantId   = $this->resolveTenantId($request);
         $priority   = config('qz-tray.identity_priority', ['device', 'user', 'session']);
@@ -315,8 +344,34 @@ class QzSecurityController extends Controller
         ]);
     }
 
+    /**
+     * AUDIT H3: query-param twin of getPrinter(). The segment route
+     * (/qz/printer/{path}) sends the page path URL-encoded, and Apache
+     * rejects encoded slashes by default (AllowEncodedSlashes Off -> 404).
+     * This variant carries the same value as ?path= which no web server
+     * mangles. Same behavior, same response shape.
+     */
+    public function getPrinterByQuery(Request $request): \Illuminate\Http\JsonResponse
+    {
+        $path = (string) $request->query('path', '');
+
+        if ($path === '' || mb_strlen($path) > 500) {
+            return response()->json(['success' => false, 'message' => 'Missing or invalid path parameter'], 400);
+        }
+
+        return $this->getPrinter($request, $path);
+    }
+
     public function clearCache(Request $request): \Illuminate\Http\JsonResponse
     {
+        // AUDIT H4: consistent graceful degradation (see setPrinter()).
+        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_printer_preferences')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'qz_printer_preferences table not migrated. Run: php artisan migrate',
+            ], 503);
+        }
+
         $identities = $this->resolveIdentities($request);
 
         // Unlike setPrinter/getPrinter, an explicit tenant is optional here:
@@ -380,6 +435,11 @@ class QzSecurityController extends Controller
             'document'   => 'nullable|string|max:255',
             'device_id'  => 'nullable|uuid',
             'job_id'     => 'nullable|uuid',
+            // AUDIT C2: the client can now drive the job lifecycle explicitly
+            // (pending -> processing -> completed/failed) through the same
+            // idempotent POST /qz/print endpoint, or via PATCH /qz/jobs/{id}.
+            'status'        => 'nullable|in:pending,processing,completed,failed,cancelled',
+            'error_message' => 'nullable|string|max:1000',
             'metadata'   => 'nullable|array',
             // Accepted under either name: some host apps call it
             // "tenant_id", others "project_id" — same value, one column.
@@ -418,7 +478,19 @@ class QzSecurityController extends Controller
             // (db_logged === false) response path below.
             : $this->generateUuid();
         $type  = $request->input('type');
-        $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
+
+        // AUDIT H5: the X-Device-Id header used to be written straight into
+        // the uuid-typed device_id column without any validation — any
+        // non-UUID garbage made the INSERT throw and silently degraded
+        // db_logged to false with a warning on every print. Validate the
+        // header exactly like resolveIdentities() does, falling back to the
+        // already-validated body value, else null.
+        $deviceId = $request->header('X-Device-Id');
+
+        if ($deviceId !== null
+            && ! preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $deviceId)) {
+            $deviceId = $validated['device_id'] ?? null;
+        }
 
         // Project/tenant id: explicit request value wins, validated against
         // whichever type config('qz-tray.id_type') is currently set to
@@ -432,11 +504,24 @@ class QzSecurityController extends Controller
 
         // Persist to database when the qz_print_jobs table exists.
         // This makes the migration that ships with the package actually useful.
+        //
+        // AUDIT C2: this used to be a blind INSERT. The SmartPrint client
+        // logs the SAME job more than once by design (a "completed" report
+        // follows the initial log, with the same job_id), so every successful
+        // print either crashed into a duplicate-primary-key error (uuid
+        // mode, leaving the row stuck at 'pending' forever) or created a
+        // SECOND row (bigint mode, duplicating history). The endpoint is now
+        // an UPSERT: an existing row for the same client job id is updated
+        // in place (status moved forward, metadata refreshed), otherwise a
+        // new row is created. The additive client_job_id column (v1.2.1
+        // migration) gives bigint installs the same idempotency.
         $dbLogged = false;
+        $status   = $validated['status'] ?? null;
+
         if (\Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
             try {
                 $user = $request->user();
-                $row = [
+                $base = [
                     'tenant_id'     => $tenantId,
                     'user_id'       => $user ? (string) $user->getAuthIdentifier() : null,
                     'user_type'     => $user ? get_class($user) : null,
@@ -445,27 +530,61 @@ class QzSecurityController extends Controller
                     'document_url'  => $request->input('url', ''),
                     'document_type' => $type,
                     'copies'        => (int) $request->input('copies', 1),
-                    'status'        => 'pending',
                     'metadata'      => json_encode($request->input('metadata', [])),
-                    'created_at'    => now(),
+                    'error_message' => $validated['error_message'] ?? null,
                     'updated_at'    => now(),
                 ];
 
-                if ($usesUuid) {
-                    $row['id'] = $jobId;
-                    \DB::table('qz_print_jobs')->insert($row);
+                $existing = null;
+
+                if ($clientJobId) {
+                    $existing = $usesUuid
+                        ? \DB::table('qz_print_jobs')->where('id', $clientJobId)->first()
+                        : \DB::table('qz_print_jobs')->where('client_job_id', $clientJobId)->first();
+                }
+
+                if ($existing) {
+                    // Same job reported again — update in place. processed_at
+                    // is stamped the first time the job reaches a terminal
+                    // state (completed/failed/cancelled) and never moved back.
+                    \DB::table('qz_print_jobs')->where('id', $existing->id)->update($base + [
+                        'status' => $status ?? $existing->status,
+                        'processed_at' => in_array($status, ['completed', 'failed', 'cancelled'], true)
+                            ? ($existing->processed_at ?? now())
+                            : $existing->processed_at,
+                    ]);
+                    $jobId = (string) $existing->id;
                 } else {
-                    // Auto-increment PK: the id can only be known after
-                    // insert. Overwrites the placeholder uuid above with
-                    // the real row id so the response's job_id actually
-                    // matches what jobs()/cancelJob() can look up.
-                    $jobId = (string) \DB::table('qz_print_jobs')->insertGetId($row);
+                    $row = $base + ['status' => $status ?? 'pending', 'created_at' => now()];
+
+                    if ($clientJobId) {
+                        $row['client_job_id'] = $clientJobId;
+                    }
+
+                    if ($usesUuid) {
+                        $row['id'] = $jobId;
+                        \DB::table('qz_print_jobs')->insert($row);
+                    } else {
+                        // Auto-increment PK: the id can only be known after
+                        // insert. Overwrites the placeholder uuid above with
+                        // the real row id so the response's job_id actually
+                        // matches what jobs()/cancelJob() can look up.
+                        $jobId = (string) \DB::table('qz_print_jobs')->insertGetId($row);
+                    }
                 }
                 $dbLogged = true;
             } catch (\Throwable $e) {
                 Log::warning('[QZ Tray] Could not persist print job to DB: ' . $e->getMessage());
             }
         }
+
+        event(new \Bitdreamit\QzTray\Events\PrintJobLogged(
+            $jobId,
+            $request->input('printer'),
+            $type,
+            $status ?? 'pending',
+            $dbLogged
+        ));
 
         if (config('qz-tray.logging.enabled', false)) {
             Log::channel(config('qz-tray.logging.channel', 'stack'))
@@ -488,14 +607,94 @@ class QzSecurityController extends Controller
         ]);
     }
 
+    /**
+     * AUDIT C2 (client half): a dedicated status-update endpoint.
+     * The SmartPrint client marks a job processing/completed/failed via
+     * PATCH instead of replaying POST /qz/print. POST /qz/print remains an
+     * upsert so both old and new clients keep working. Ownership scoping is
+     * identical to cancelJob() — only the submitting user/device may mutate
+     * a job, and foreign ids return 404 without leaking existence.
+     */
+    public function updateJobStatus(Request $request, string $id): \Illuminate\Http\JsonResponse
+    {
+        $validated = $request->validate([
+            'status'        => 'required|in:pending,processing,completed,failed,cancelled',
+            'error_message' => 'nullable|string|max:1000',
+            'device_id'     => 'nullable|uuid',
+        ]);
+
+        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+            return response()->json(['success' => false, 'message' => 'qz_print_jobs table not migrated'], 404);
+        }
+
+        $user     = $request->user();
+        $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
+
+        if ($deviceId !== null
+            && ! preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $deviceId)) {
+            $deviceId = null;
+        }
+
+        $updated = \DB::table('qz_print_jobs')
+            ->where('id', $id)
+            ->where(function ($query) use ($user, $deviceId) {
+                if ($user) {
+                    $query->where(function ($q) use ($user) {
+                        $q->where('user_id', (string) $user->getAuthIdentifier())
+                            ->where('user_type', get_class($user));
+                    });
+                }
+
+                if ($deviceId) {
+                    $query->orWhere('device_id', $deviceId);
+                }
+
+                if (! $user && ! $deviceId) {
+                    $query->whereRaw('1 = 0');
+                }
+            })
+            ->update([
+                'status'        => $validated['status'],
+                'error_message' => $validated['error_message'] ?? null,
+                'processed_at'  => in_array($validated['status'], ['completed', 'failed', 'cancelled'], true)
+                    ? now()
+                    : null,
+                'updated_at'    => now(),
+            ]);
+
+        if (! $updated) {
+            return response()->json(['success' => false, 'message' => "Print job {$id} not found or not owned by you"], 404);
+        }
+
+        event(new \Bitdreamit\QzTray\Events\PrintJobStatusUpdated($id, $validated['status']));
+
+        return response()->json([
+            'success' => true,
+            'message' => "Print job {$id} marked as {$validated['status']}",
+            'job_id'  => $id,
+            'status'  => $validated['status'],
+            'timestamp' => now()->toIso8601String(),
+        ]);
+    }
+
     public function jobs(Request $request): \Illuminate\Http\JsonResponse
     {
         if (! \Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
             return response()->json(['success' => true, 'jobs' => [], 'message' => 'qz_print_jobs table not migrated']);
         }
 
+        // AUDIT C2 companion: ?status= lets the client filter the queue
+        // (comma-separated; unknown values are ignored). Defaults stay
+        // exactly as before (pending + processing) for backward compat.
+        $statuses = collect(explode(',', (string) $request->query('status', '')))
+            ->map(fn ($s) => trim($s))
+            ->filter(fn ($s) => in_array($s, ['pending', 'processing', 'completed', 'failed', 'cancelled'], true))
+            ->unique()
+            ->values()
+            ->all();
+
         $query = \DB::table('qz_print_jobs')
-            ->whereIn('status', ['pending', 'processing'])
+            ->whereIn('status', $statuses ?: ['pending', 'processing'])
             ->orderBy('created_at');
 
         // Scope the queue to the requesting identity so PC-1's queue view
@@ -529,7 +728,40 @@ class QzSecurityController extends Controller
             return response()->json(['success' => false, 'message' => 'qz_print_jobs table not migrated'], 404);
         }
 
-        $job = \DB::table('qz_print_jobs')->where('id', $id)->first();
+        // AUDIT C4 (IDOR): anyone with a session used to be able to cancel
+        // ANY job by id — and in bigint mode those ids are sequential and
+        // guessable. Scope the lookup to identities owned by the requester
+        // (same scoping as jobs()): matching user (id+type pair) or the
+        // device UUID. A job owned by somebody else returns 404 without
+        // leaking its existence.
+        $user     = $request->user();
+        $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
+
+        if ($deviceId !== null
+            && ! preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $deviceId)) {
+            $deviceId = null;
+        }
+
+        $job = \DB::table('qz_print_jobs')
+            ->where('id', $id)
+            ->where(function ($query) use ($user, $deviceId) {
+                if ($user) {
+                    $query->where(function ($q) use ($user) {
+                        $q->where('user_id', (string) $user->getAuthIdentifier())
+                            ->where('user_type', get_class($user));
+                    });
+                }
+
+                if ($deviceId) {
+                    $query->orWhere('device_id', $deviceId);
+                }
+
+                if (! $user && ! $deviceId) {
+                    // No identity at all -> owns nothing.
+                    $query->whereRaw('1 = 0');
+                }
+            })
+            ->first();
 
         if (! $job) {
             return response()->json(['success' => false, 'message' => "Print job {$id} not found"], 404);
@@ -547,6 +779,8 @@ class QzSecurityController extends Controller
             'processed_at' => now(),
             'updated_at'   => now(),
         ]);
+
+        event(new \Bitdreamit\QzTray\Events\PrintJobStatusUpdated($id, 'cancelled'));
 
         return response()->json([
             'success' => true,
@@ -567,8 +801,11 @@ class QzSecurityController extends Controller
         $fileName   = config("qz-tray.installers.{$os}");
         $publicPath = public_path("vendor/qz-tray/installers/{$fileName}");
 
-        // Serve the bundled installer when it was published and exists.
-        if ($fileName && is_file($publicPath)) {
+        // AUDIT H1: the repo previously tracked 0-BYTE placeholder installer
+        // files; is_file() passed and users downloaded an empty .exe/.deb/.pkg
+        // that silently corrupted their install. Require a real payload and
+        // fall through to the official-download JSON otherwise.
+        if ($fileName && is_file($publicPath) && filesize($publicPath) > 0) {
             $mime = [
                 'windows' => 'application/vnd.microsoft.portable-executable',
                 'linux'   => 'application/vnd.debian.binary-package',
@@ -593,8 +830,14 @@ class QzSecurityController extends Controller
     /**
      * Test PDF endpoint — no external dependency required.
      * If barryvdh/laravel-dompdf is installed it will produce a real PDF.
+     *
+     * AUDIT M2: the declared return type used to be \Illuminate\Http\Response,
+     * but DomPDF's stream() returns Symfony\Component\HttpFoundation\StreamedResponse
+     * — a SIBLING of Illuminate\Http\Response, not a subclass — so the
+     * endpoint threw a TypeError on every call whenever DomPDF was installed.
+     * Widening to the Symfony parent type covers both return paths.
      */
-    public function testPdf(): Response
+    public function testPdf(): \Symfony\Component\HttpFoundation\Response
     {
         $html = '<!DOCTYPE html><html><head><meta charset="utf-8">
             <title>QZ Tray Test PDF</title>

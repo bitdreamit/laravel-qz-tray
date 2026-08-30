@@ -110,6 +110,52 @@ window.SmartPrint = (() => {
         return document.querySelector('meta[name="csrf-token"]')?.content ?? '';
     }
 
+    // ============================
+    // HTML escaping (AUDIT C3)
+    // ============================
+    // Printer names come from the OS (and can originate a malicious network
+    // share); job URLs can be built from user input. Anything interpolated
+    // into HTML must pass through here.
+    function escapeHtml(str) {
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // ============================
+    // Endpoint configuration (AUDIT H2)
+    // ============================
+    // The route prefix is server-configurable via config('qz-tray.routes.prefix'),
+    // but every fetch below hardcoded '/qz/...' — changing the prefix
+    // silently broke certificate retrieval, signing, and printer memory.
+    // A host app can now override once, before including this file:
+    //   window.QZ_CONFIG = { prefix: 'printing' };
+    // or supply absolute URLs per endpoint:
+    //   window.QZ_CONFIG = { endpoints: { certificate: '/printing/certificate', ... } };
+    function apiBase() {
+        const cfg = window.QZ_CONFIG || {};
+        if (cfg.prefix !== undefined && cfg.prefix !== null) {
+            return '/' + String(cfg.prefix).replace(/^\/+|\/+$/g, '');
+        }
+        return '/qz';
+    }
+
+    function endpoint(name) {
+        const cfg = window.QZ_CONFIG || {};
+        const defaults = {
+            certificate: apiBase() + '/certificate',
+            sign:        apiBase() + '/sign',
+            printerSet:  apiBase() + '/printer',
+            printerGet:  apiBase() + '/printer',
+            print:       apiBase() + '/print',
+            jobs:        apiBase() + '/jobs',
+        };
+        return (cfg.endpoints && cfg.endpoints[name]) || defaults[name];
+    }
+
     // Server sync is opt-out via window.QZ_CONFIG.serverSync = false, for
     // deployments that only ever want the localStorage-only behavior of
     // pre-1.1 releases.
@@ -120,8 +166,11 @@ window.SmartPrint = (() => {
     const state = {
         qzReady:      false,
         connecting:   false,
+        connectPromise: null,
+        launchAttempts: 0,   // AUDIT H7: cap qz:launch protocol attempts per page load
         printers:     [],
         currentPrinter: null,
+        _lastSyncedKey: null, // AUDIT M6: suppress redundant server syncs
         queue:        [],
         failedQueue:  [],
         listeners:    {},
@@ -149,7 +198,7 @@ window.SmartPrint = (() => {
         if (!window.qz) return;
 
         qz.security.setCertificatePromise(resolve =>
-            fetch('/qz/certificate', {
+            fetch(endpoint('certificate'), {
                 cache: 'no-store',
                 headers: { 'X-Device-Id': getDeviceId() },
             })
@@ -163,7 +212,7 @@ window.SmartPrint = (() => {
         qz.security.setSignatureAlgorithm('SHA512');
 
         qz.security.setSignaturePromise(toSign => (resolve, reject) =>
-            fetch('/qz/sign', {
+            fetch(endpoint('sign'), {
                 method: 'POST',
                 cache:  'no-store',
                 headers: {
@@ -182,6 +231,44 @@ window.SmartPrint = (() => {
     // ============================
     // Connect QZ Tray
     // ============================
+    // AUDIT H6: concurrent callers used to poll qz.websocket.isActive()
+    // after a blind 200ms nap — far shorter than a real handshake — so a
+    // caller arriving during a slow connect received `false`, pushed its job
+    // to the offline buffer, and printed a duplicate when retrying. All
+    // callers now share the same in-flight attempt via state.connectPromise.
+    async function attemptConnect(retries) {
+        try {
+            await qz.websocket.connect();
+            state.qzReady = true;
+            try {
+                state.printers = await qz.printers.find();
+            } catch (listErr) {
+                // A connected Tray with zero usable system printers still
+                // counts as connected; find() can throw instead of [].
+                state.printers = [];
+            }
+            restorePrinter();
+            emit('connected', { printers: state.printers });
+            emit('printers-loaded', { printers: state.printers });
+            return true;
+        } catch (err) {
+            // AUDIT H7: qz:launch used to fire on every retry AND on every
+            // 10s auto-reconnect tick, so a machine without QZ Tray saw a
+            // native protocol dialog roughly every 10 seconds (Firefox
+            // prompts each time). Attempt the protocol launch at most twice
+            // per page load, then reconnect silently.
+            if (retries > 0 && state.launchAttempts < 2) {
+                state.launchAttempts++;
+                try { launchQZProtocol(); } catch (_) {}
+                await new Promise(r => setTimeout(r, 1500));
+                return attemptConnect(retries - 1);
+            }
+            state.qzReady = false;
+            emit('connection-failed', { error: err });
+            return false;
+        }
+    }
+
     async function connectQZ(retries = 2) {
         if (!window.qz) {
             console.warn('[SmartPrint] QZ Tray library not loaded. Add qz-tray.min.js to your page.');
@@ -191,42 +278,18 @@ window.SmartPrint = (() => {
 
         if (qz.websocket.isActive()) return true;
 
-        if (state.connecting) {
-            // Wait for the existing attempt to finish
-            await new Promise(r => setTimeout(r, 200));
-            return qz.websocket.isActive();
+        if (state.connectPromise) {
+            return state.connectPromise;
         }
 
         state.connecting = true;
         setupSecurity();
-
-        try {
-            await qz.websocket.connect();
-            state.qzReady  = true;
-            state.printers = await qz.printers.find();
-            restorePrinter();
-            emit('connected', { printers: state.printers });
-            emit('printers-loaded', { printers: state.printers });
-            return true;
-        } catch (err) {
-            if (retries > 0) {
-                // Attempt to launch QZ Tray via a hidden iframe so we don't
-                // navigate the current page away (which `location.assign`
-                // would do). The protocol handler `qz:launch` is ignored
-                // silently by the browser when QZ Tray isn't installed.
-                try {
-                    launchQZProtocol();
-                } catch (_) {}
-                await new Promise(r => setTimeout(r, 1500));
-                state.connecting = false;
-                return connectQZ(retries - 1);
-            }
-            state.qzReady = false;
-            emit('connection-failed', { error: err });
-            return false;
-        } finally {
+        state.connectPromise = attemptConnect(retries).finally(() => {
             state.connecting = false;
-        }
+            state.connectPromise = null;
+        });
+
+        return state.connectPromise;
     }
 
     // Trigger the `qz:launch` protocol handler without leaving the page.
@@ -282,8 +345,12 @@ window.SmartPrint = (() => {
         // value localStorage already had.
         if (!saved && serverSyncEnabled()) {
             const tenantId = pageTenantId();
-            const qs = tenantId ? ('?tenant_id=' + encodeURIComponent(tenantId)) : '';
-            fetch('/qz/printer/' + encodeURIComponent(pathKey()) + qs, {
+            // AUDIT H3: send the page path as ?path= instead of a URL-encoded
+            // path segment. encodeURIComponent(pathname) produces %2F for
+            // every slash, and Apache rejects %2F by default (404). The
+            // query-param route works on every web server.
+            const qs = tenantId ? ('&tenant_id=' + encodeURIComponent(tenantId)) : '';
+            fetch(endpoint('printerGet') + '?path=' + encodeURIComponent(pathKey()) + qs, {
                 headers: { 'X-Device-Id': getDeviceId() },
                 cache: 'no-store',
             })
@@ -313,9 +380,15 @@ window.SmartPrint = (() => {
             state.channel.postMessage({ printer });
         }
 
-        if (serverSyncEnabled()) {
+        // AUDIT M6: printQZ() calls rememberPrinter() on EVERY print, and the
+        // old code POSTed to the server each time — four identical writes for
+        // four receipts on one page. Only sync when the choice actually
+        // changed for this scope (or the scope itself changed).
+        const syncKey = scope + ':' + printer;
+        if (serverSyncEnabled() && state._lastSyncedKey !== syncKey) {
+            state._lastSyncedKey = syncKey;
             const tenantId = pageTenantId();
-            fetch('/qz/printer', {
+            fetch(endpoint('printerSet'), {
                 method: 'POST',
                 cache:  'no-store',
                 headers: {
@@ -426,11 +499,13 @@ window.SmartPrint = (() => {
     // ============================
     // Server-side job logging (best-effort, non-blocking)
     // ============================
-    // Sends the SAME client-generated job.id as `job_id` so the row created
-    // here is the one GET /qz/jobs and DELETE /qz/jobs/{id} can look up —
-    // previously the server minted its own uniqid() that no client code
-    // ever saw, so the queue/cancel endpoints were unreachable from the UI.
-    function logPrintJob(job, printer, status) {
+    // Lifecycle (AUDIT C2): the client reports 'processing' when the job
+    // starts and 'completed'/'failed' when qz.print() settles. POST /qz/print
+    // is an idempotent upsert on the client job id (v1.2.1), so the repeat
+    // reports no longer crash into a duplicate-primary-key error (uuid mode)
+    // or fork a second row (bigint mode) — the old behavior left every row
+    // stuck at 'pending' forever and made the queue endpoints useless.
+    function logPrintJob(job, printer, status, errorMessage) {
         if (!serverSyncEnabled()) return;
         // Per-job value wins; otherwise fall back to a page-wide default set
         // by the host app (e.g. window.QZ_CONFIG.tenantId = '{{ $project->id }}'
@@ -439,7 +514,7 @@ window.SmartPrint = (() => {
             ?? (window.QZ_CONFIG && (window.QZ_CONFIG.tenantId ?? window.QZ_CONFIG.projectId))
             ?? undefined;
 
-        fetch('/qz/print', {
+        fetch(endpoint('print'), {
             method: 'POST',
             cache:  'no-store',
             headers: {
@@ -457,6 +532,8 @@ window.SmartPrint = (() => {
                 copies:    job.copies,
                 device_id: getDeviceId(),
                 tenant_id: tenantId !== undefined ? String(tenantId) : undefined,
+                status,
+                error_message: errorMessage || undefined,
                 metadata:  { status: status || 'completed' },
             }),
         }).catch(() => {}); // logging failure must never block/alter the print result
@@ -552,6 +629,7 @@ window.SmartPrint = (() => {
         }
 
         try {
+            logPrintJob(job, printer, 'processing');
             await qz.print(cfg, payload);
             emit('job-completed', { job });
             logPrintJob(job, printer, 'completed');
@@ -561,6 +639,7 @@ window.SmartPrint = (() => {
             console.error('[SmartPrint] Print error:', err);
             emit('job-failed', { job, error: err });
             safeCallback(job.onError, err, job);
+            logPrintJob(job, printer, 'failed', err && err.message);
             fallback(job);
             job._reject && job._reject(err);
         }
@@ -610,22 +689,52 @@ window.SmartPrint = (() => {
             'align-items:center', 'justify-content:center',
         ].join(';');
 
-        const printerButtons = state.printers.length
-            ? state.printers.map(p =>
-                `<button data-printer="${p}" style="display:block;width:100%;margin:4px 0;padding:8px;cursor:pointer;">${p}</button>`
-              ).join('')
-            : '<p style="color:#888;">No printers found. Is QZ Tray running?</p>';
+        // AUDIT C3: printer names arrive from the OS (and potentially from a
+        // malicious network share) and were interpolated into innerHTML
+        // unescaped — the exact sink BUG-01 fixed in the demo blade view but
+        // left open here. Build every node through the DOM API so no HTML
+        // parsing ever happens on OS-provided strings.
+        const box = document.createElement('div');
+        box.className = 'sp-box';
+        box.style.cssText = 'background:#fff;padding:24px;border-radius:8px;min-width:280px;max-width:400px;';
 
-        modal.innerHTML = `
-            <div class="sp-box" style="background:#fff;padding:24px;border-radius:8px;min-width:280px;max-width:400px;">
-                <h3 style="margin:0 0 16px;">Select Printer</h3>
-                ${printerButtons}
-                <button id="sp-modal-cancel" style="margin-top:12px;padding:6px 12px;cursor:pointer;">Cancel</button>
-            </div>`;
+        const title = document.createElement('h3');
+        title.style.cssText = 'margin:0 0 16px;';
+        title.textContent = 'Select Printer';
+        box.appendChild(title);
 
+        if (state.printers.length) {
+            state.printers.forEach(p => {
+                const btn = document.createElement('button');
+                btn.style.cssText = 'display:block;width:100%;margin:4px 0;padding:8px;cursor:pointer;';
+                btn.textContent = p;               // textContent — never HTML
+                btn.dataset.printer = p;           // data attribute — never interpolated
+                box.appendChild(btn);
+            });
+        } else {
+            const empty = document.createElement('p');
+            empty.style.color = '#888';
+            empty.textContent = 'No printers found. Is QZ Tray running?';
+            box.appendChild(empty);
+        }
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.id = 'sp-modal-cancel';
+        cancelBtn.style.cssText = 'margin-top:12px;padding:6px 12px;cursor:pointer;';
+        cancelBtn.textContent = 'Cancel';
+        box.appendChild(cancelBtn);
+
+        modal.appendChild(box);
         document.body.appendChild(modal);
 
-        modal.querySelectorAll('[data-printer]').forEach(btn => {
+        const abandon = () => {
+            modal.remove();
+            if (jobToQueue && jobToQueue._reject) {
+                jobToQueue._reject(new Error('Print cancelled: no printer selected'));
+            }
+        };
+
+        box.querySelectorAll('[data-printer]').forEach(btn => {
             btn.onclick = () => {
                 const printer = btn.dataset.printer;
                 rememberPrinter(printer);
@@ -642,14 +751,7 @@ window.SmartPrint = (() => {
             };
         });
 
-        const abandon = () => {
-            modal.remove();
-            if (jobToQueue && jobToQueue._reject) {
-                jobToQueue._reject(new Error('Print cancelled: no printer selected'));
-            }
-        };
-
-        modal.querySelector('#sp-modal-cancel').onclick = abandon;
+        cancelBtn.onclick = abandon;
 
         // Close on backdrop click
         modal.addEventListener('click', e => { if (e.target === modal) abandon(); });
@@ -658,52 +760,97 @@ window.SmartPrint = (() => {
     // ============================
     // DOM Binding — supports both data-qz-print and legacy data-smart-print
     // ============================
-    function bind() {
-        document.addEventListener('click', e => {
-            const el = e.target.closest('[data-qz-print], [data-smart-print]');
-            if (!el) return;
+    let _clickBound = false;
 
-            // Prevent default so buttons inside <form> don't submit.
-            e.preventDefault();
+    // Read the auto-print data attributes off one element and queue it.
+    // Shared by the initial page scan and the (optional) MutationObserver so
+    // both paths stay in sync.
+    function enqueueAutoPrintJob(el) {
+        const url     = el.dataset.qzAutoPrint || el.dataset.url;
+        const printer = el.dataset.qzPrinter   || el.dataset.printer;
+        const copies  = el.dataset.qzCopies    || el.dataset.copies;
+        const type    = el.dataset.qzType      || el.dataset.type    || 'pdf';
+        const data    = el.dataset.qzData      || el.dataset.data;
+        const profile = el.dataset.qzProfile   || el.dataset.profile;
+        const delay   = parseInt(el.dataset.qzDelay || el.dataset.delay || '0', 10);
 
-            // Support both attribute naming conventions
-            const url     = el.dataset.qzPrint     || el.dataset.url     || el.dataset.smartPrint;
-            const printer = el.dataset.qzPrinter   || el.dataset.printer;
-            const copies  = el.dataset.qzCopies    || el.dataset.copies;
-            const type    = el.dataset.qzType      || el.dataset.type    || 'pdf';
-            const data    = el.dataset.qzData      || el.dataset.data;
-            const profile = el.dataset.qzProfile   || el.dataset.profile;
-            const delay   = parseInt(el.dataset.qzDelay || el.dataset.delay || '0', 10);
+        if (!url && !data) return; // nothing to print
 
-            const job = { url, printer, copies: parseInt(copies, 10) || 1, type, data, profile };
+        const job = { url, printer, copies: parseInt(copies, 10) || 1, type, data, profile };
 
-            if (delay > 0) {
-                setTimeout(() => enqueue(job), delay);
-            } else {
-                enqueue(job);
-            }
-        });
+        if (delay > 0) {
+            setTimeout(() => enqueue(job), delay);
+        } else {
+            enqueue(job);
+        }
+    }
 
-        // Auto-print elements: data-qz-auto-print="URL" or data-auto-print="true" + data-url="URL"
-        document.querySelectorAll('[data-qz-auto-print], [data-auto-print="true"]').forEach(el => {
-            const url     = el.dataset.qzAutoPrint || el.dataset.url;
-            const printer = el.dataset.qzPrinter   || el.dataset.printer;
-            const copies  = el.dataset.qzCopies    || el.dataset.copies;
-            const type    = el.dataset.qzType      || el.dataset.type    || 'pdf';
-            const data    = el.dataset.qzData      || el.dataset.data;
-            const profile = el.dataset.qzProfile   || el.dataset.profile;
-            const delay   = parseInt(el.dataset.qzDelay || el.dataset.delay || '0', 10);
+    function scanAutoPrint(root) {
+        root = root || document;
+        root.querySelectorAll('[data-qz-auto-print], [data-auto-print="true"]').forEach(enqueueAutoPrintJob);
+    }
 
-            if (!url && !data) return; // nothing to print
+    // AUDIT M7: auto-print elements were scanned exactly once at init, so
+    // anything injected later (Turbo/Inertia navigation, modals, AJAX)
+    // never fired. bind() now accepts a root element, and opt-in DOM
+    // observation (window.QZ_CONFIG.observeDom = true) auto-queues new
+    // auto-print nodes as they appear.
+    function bind(root) {
+        root = root || document;
 
-            const job = { url, printer, copies: parseInt(copies, 10) || 1, type, data, profile };
+        // The delegated click listener is registered once, document-wide.
+        if (! _clickBound) {
+            _clickBound = true;
+            document.addEventListener('click', e => {
+                const el = e.target.closest('[data-qz-print], [data-smart-print]');
+                if (!el) return;
 
-            if (delay > 0) {
-                setTimeout(() => enqueue(job), delay);
-            } else {
-                enqueue(job);
-            }
-        });
+                // Prevent default so buttons inside <form> don't submit.
+                e.preventDefault();
+
+                // Support both attribute naming conventions
+                const url     = el.dataset.qzPrint     || el.dataset.url     || el.dataset.smartPrint;
+                const printer = el.dataset.qzPrinter   || el.dataset.printer;
+                const copies  = el.dataset.qzCopies    || el.dataset.copies;
+                const type    = el.dataset.qzType      || el.dataset.type    || 'pdf';
+                const data    = el.dataset.qzData      || el.dataset.data;
+                const profile = el.dataset.qzProfile   || el.dataset.profile;
+                const delay   = parseInt(el.dataset.qzDelay || el.dataset.delay || '0', 10);
+
+                const job = { url, printer, copies: parseInt(copies, 10) || 1, type, data, profile };
+
+                if (delay > 0) {
+                    setTimeout(() => enqueue(job), delay);
+                } else {
+                    enqueue(job);
+                }
+            });
+        }
+
+        if (root === document) {
+            scanAutoPrint(document);
+        } else if (root.querySelectorAll) {
+            root.querySelectorAll('[data-qz-auto-print], [data-auto-print="true"]').forEach(enqueueAutoPrintJob);
+        }
+    }
+
+    function observeDom() {
+        if (typeof MutationObserver === 'undefined' || !document.body) return;
+
+        new MutationObserver(mutations => {
+            mutations.forEach(m => {
+                m.addedNodes.forEach(node => {
+                    if (node.nodeType !== 1) return;
+                    if (node.matches && node.matches('[data-qz-auto-print], [data-auto-print="true"]')) {
+                        enqueueAutoPrintJob(node);
+                    }
+                    if (node.querySelectorAll) {
+                        node.querySelectorAll('[data-qz-auto-print], [data-auto-print="true"]')
+                            .forEach(enqueueAutoPrintJob);
+                    }
+                });
+            });
+        }).observe(document.body, { childList: true, subtree: true });
     }
 
     // ============================
@@ -722,7 +869,10 @@ window.SmartPrint = (() => {
         state.failedQueue.forEach((job, i) => {
             const li = document.createElement('li');
             li.style.color = 'red';
-            li.innerHTML = `Failed: ${job.type} — ${job.url || 'Raw Data'} `;
+            // AUDIT C3: innerHTML with an unescaped job.url was an XSS sink —
+            // a crafted data-qz-print URL (or any job URL derived from user
+            // input) executed script in the host page. textContent is inert.
+            li.textContent = `Failed: ${job.type} — ${job.url || 'Raw Data'} `;
             const btn = document.createElement('button');
             btn.style.fontSize = '11px';
             btn.textContent = 'Retry';
@@ -739,16 +889,33 @@ window.SmartPrint = (() => {
     }
 
     // ============================
-    // Hotkey: Ctrl + Shift + P
+    // Hotkey — configurable via QZ_CONFIG.hotkey (AUDIT M5)
     // ============================
-    document.addEventListener('keydown', e => {
-        // `e.key` is 'P' (uppercase) when Shift is held on most layouts.
-        // Accept both 'P' and 'p' for robustness across keyboard layouts.
-        if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
+    // The hotkey.enabled / hotkey.combination settings existed in the PHP
+    // config but were never sent to the browser — this listener hardcoded
+    // ctrl+shift+p. It now honors window.QZ_CONFIG.hotkey (bridged by the
+    // package views) and still defaults to ctrl+shift+p otherwise.
+    (() => {
+        const hotkeyCfg = (window.QZ_CONFIG && window.QZ_CONFIG.hotkey) || {};
+        if (hotkeyCfg.enabled === false) return;
+
+        const combo = String(hotkeyCfg.combination || 'ctrl+shift+p')
+            .toLowerCase().split('+').map(s => s.trim()).filter(Boolean);
+        const modifiers = ['ctrl', 'shift', 'alt', 'meta', 'cmd'];
+        const wantCtrl  = combo.includes('ctrl');
+        const wantShift = combo.includes('shift');
+        const wantAlt   = combo.includes('alt');
+        const wantMeta  = combo.includes('meta') || combo.includes('cmd');
+        const keyPart   = combo.filter(k => !modifiers.includes(k)).pop() || 'p';
+
+        document.addEventListener('keydown', e => {
+            if (e.ctrlKey !== wantCtrl || e.shiftKey !== wantShift
+                || e.altKey !== wantAlt || e.metaKey !== wantMeta) return;
+            if ((e.key || '').toLowerCase() !== keyPart) return;
             e.preventDefault();
             openPrinterModal(null);
-        }
-    });
+        });
+    })();
 
     // ============================
     // Auto-reconnect every 10s if disconnected
@@ -766,6 +933,9 @@ window.SmartPrint = (() => {
     // ============================
     function init() {
         bind();
+        if (window.QZ_CONFIG && window.QZ_CONFIG.observeDom) {
+            observeDom();
+        }
         connectQZ().then(() => {
             retryOffline();
             updateQueueUI();
@@ -785,6 +955,7 @@ window.SmartPrint = (() => {
     return {
         // Core
         init,
+        bind,
         print: (urlOrOptions, options) => {
             if (typeof urlOrOptions === 'string') {
                 return enqueue({ url: urlOrOptions, type: 'pdf', copies: 1, ...options });
@@ -841,12 +1012,20 @@ window.SmartPrint = (() => {
 // ============================
 // Global shorthand helpers
 // ============================
-function smartPrint(url, options) {
-    return SmartPrint.print(url, options);
+// Guarded so including other libraries that happen to define the same names
+// doesn't crash the page.
+if (typeof window.smartPrint === 'undefined') {
+    window.smartPrint = function (url, options) {
+        return SmartPrint.print(url, options);
+    };
 }
-function smartPrintZPL(zpl, printer) {
-    return SmartPrint.printZPL(zpl, printer);
+if (typeof window.smartPrintZPL === 'undefined') {
+    window.smartPrintZPL = function (zpl, printer) {
+        return SmartPrint.printZPL(zpl, printer);
+    };
 }
-function smartPrintESC(escpos, printer) {
-    return SmartPrint.printESC(escpos, printer);
+if (typeof window.smartPrintESC === 'undefined') {
+    window.smartPrintESC = function (escpos, printer) {
+        return SmartPrint.printESC(escpos, printer);
+    };
 }

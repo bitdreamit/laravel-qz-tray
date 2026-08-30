@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Smart Print — Laravel QZ Tray</title>
+    <script>
+        {{-- AUDIT H2: server-side package config is now bridged to the client.
+        smart-print.js reads window.QZ_CONFIG for the route prefix, UUID
+        version, and tenant defaults — previously the hotkey combination,
+        prefix, and other settings were configured in PHP but hardcoded (or
+        absent) in JavaScript. --}}
+        window.QZ_CONFIG = {
+            prefix: '{{ config('qz-tray.routes.prefix', 'qz') }}',
+            uuidVersion: '{{ config('qz-tray.uuid_version', 'v7') }}',
+            serverSync: {{ config('qz-tray.server_sync', true) ? 'true' : 'false' }},
+            hotkey: {
+                enabled: {{ config('qz-tray.hotkey.enabled', true) ? 'true' : 'false' }},
+                combination: '{{ config('qz-tray.hotkey.combination', 'ctrl+shift+p') }}',
+            },
+        };
+    </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f4f6f9; color: #333; }
