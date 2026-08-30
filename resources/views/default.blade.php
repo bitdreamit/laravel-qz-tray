@@ -22,7 +22,7 @@
 </head>
 
 <!-- Required scripts -->
-<script type="text/javascript" src="{{asset('vendor/qz-tray/js/qz-tray.js')}}"></script>
+<script type="text/javascript" src="{{asset('vendor/qz-tray/js/qz-tray.min.js')}}"></script>
 
 <!-- Pollyfills -->
 <script type="text/javascript" src="{{asset('vendor/qz-tray/js/sample/promise-polyfill-8.1.3.min.js')}}"></script>

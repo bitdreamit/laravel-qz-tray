@@ -271,7 +271,8 @@ window.SmartPrint = (() => {
 
     async function connectQZ(retries = 2) {
         if (!window.qz) {
-            console.warn('[SmartPrint] QZ Tray library not loaded. Add qz-tray.min.js to your page.');
+            console.warn('[SmartPrint] QZ Tray library not loaded. Add <script src="' +
+                (window.QZ_CONFIG && window.QZ_CONFIG.assetsBase ? window.QZ_CONFIG.assetsBase : '/vendor/qz-tray/js') + '/qz-tray.min.js"></script> to your page (before smart-print.js).');
             emit('init-failed', { reason: 'qz-library-missing' });
             return false;
         }

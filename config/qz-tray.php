@@ -5,9 +5,21 @@ return [
     |--------------------------------------------------------------------------
     | Certificate Settings
     |--------------------------------------------------------------------------
+    | v1.3.0: both paths are env-overridable so EVERY subdomain of the same
+    | project can share ONE certificate pair. On a single server, point every
+    | site's .env at the same files and copy nothing:
+    |
+    |   QZ_CERT_PATH=/home/shared/qz/digital-certificate.txt
+    |   QZ_KEY_PATH=/home/shared/qz/private-key.pem
+    |
+    | QZ Tray trust is keyed to the certificate FINGERPRINT, not the domain —
+    | identical certs across subdomains = clients click "Always Allow" once.
+    | To make the trust prompt disappear entirely, import a real CA-signed
+    | certificate: php artisan qz:certificate:import --cert=fullchain.pem --key=privkey.pem
+    | Full guide: docs/multi-domain.md
     */
-    'cert_path' => storage_path('qz/digital-certificate.txt'),
-    'key_path'  => storage_path('qz/private-key.pem'),
+    'cert_path' => env('QZ_CERT_PATH', storage_path('qz/digital-certificate.txt')),
+    'key_path'  => env('QZ_KEY_PATH',  storage_path('qz/private-key.pem')),
     'cert_ttl'  => 3600,
 
     /*

@@ -131,7 +131,7 @@
 
 @section('scripts')
     <!-- Required scripts -->
-    <script type="text/javascript" src="{{asset('vendor/qz-tray/js/qz-tray.js')}}"></script>
+    <script type="text/javascript" src="{{asset('vendor/qz-tray/js/qz-tray.min.js')}}"></script>
     <script type="text/javascript" src="{{asset('vendor/qz-tray/js/sample/jsrsasign-all-min.js')}}"></script>
     <script type="text/javascript" src="{{asset('vendor/qz-tray/js/smart-print.js')}}"></script>
     <script>

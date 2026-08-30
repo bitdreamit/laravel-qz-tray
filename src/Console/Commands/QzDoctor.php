@@ -52,9 +52,11 @@ class QzDoctor extends Command
             $issues++;
         }
 
-        // 4. Certificate expiry (only when the cert exists and parses)
+        // 4. Certificate details: expiry, issuer, fingerprint, key match
+        //    (v1.3.0 — the multi-subdomain trust diagnostics)
         if ($certOk) {
-            $parsed = openssl_x509_parse((string) file_get_contents($certPath));
+            $certPem = (string) file_get_contents($certPath);
+            $parsed  = openssl_x509_parse($certPem);
             if ($parsed && isset($parsed['validTo_time_t'])) {
                 $expiresAt = \Carbon\Carbon::createFromTimestamp($parsed['validTo_time_t']);
                 $daysLeft  = (int) now()->diffInDays($expiresAt, false);
@@ -62,6 +64,31 @@ class QzDoctor extends Command
                 $checks[]  = ['Certificate expiry', $expiresAt->toDateString()." ({$daysLeft} days left)", $expOk];
                 if (! $expOk) {
                     $issues++;
+                }
+
+                // Fingerprint — compare across subdomains: QZ Tray's trust
+                // prompt is keyed to this value, not to the domain.
+                $sha1 = openssl_x509_fingerprint($certPem, 'sha1');
+                $checks[] = ['Certificate fingerprint (SHA-1)', $sha1 ? implode(':', str_split($sha1, 2)) : 'unreadable', (bool) $sha1];
+
+                // Issuer / self-signed detection with actionable guidance.
+                $selfSigned = isset($parsed['subject'], $parsed['issuer']) && $parsed['subject'] === $parsed['issuer'];
+                $issuerCn   = $parsed['issuer']['CN'] ?? '?';
+                if ($selfSigned) {
+                    $checks[] = ['Certificate issuer', "{$issuerCn} (self-signed — trust prompt on first connect; share this cert across subdomains, or import a CA cert via qz:certificate:import)", true];
+                } else {
+                    $checks[] = ['Certificate issuer', "{$issuerCn} (CA-signed — QZ Tray connects silently)", true];
+                }
+
+                // Cert/key pair match.
+                if ($keyOk) {
+                    $certRes = openssl_x509_read($certPem);
+                    $keyRes  = openssl_pkey_get_private((string) file_get_contents($keyPath));
+                    $pairOk  = $certRes && $keyRes && openssl_x509_check_private_key($certRes, $keyRes);
+                    $checks[] = ['Certificate ↔ key match', $pairOk ? 'match' : 'MISMATCH — signing will fail; re-run qz:generate-certificate --force or qz:certificate:import', $pairOk];
+                    if (! $pairOk) {
+                        $issues++;
+                    }
                 }
             } else {
                 $checks[]  = ['Certificate expiry', 'certificate unreadable', false];

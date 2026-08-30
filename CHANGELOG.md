@@ -3,6 +3,62 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0] — 2026-08-30
+
+Multi-subdomain certificate sharing + fully self-hosted JS. Fully backward
+compatible — additive commands and config keys only.
+
+### Added
+- **The minified QZ Tray library now ships with the package**: `resources/js/qz-tray.min.js`
+  is the genuine upstream 2.2.6 (jsDelivr/Terser build, byte-verified against
+  `https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js`), tracked in git and
+  published by the `qz-assets` tag. Previously it existed only as an untracked
+  manual copy in some working clones — fresh installs (and other subdomain
+  servers) hit a 404 on `vendor/qz-tray/js/qz-tray.min.js`. The unminified
+  `qz-tray.js` remains shipped as the readable source; bump both together when
+  upgrading QZ Tray (the BUG-26 lesson).
+- `qz:certificate:export` — packages the current cert + private key into one
+  password-protected PKCS#12 (.pfx) for secure transfer to other subdomains;
+  preserves intermediate chains; prints the SHA-1 fingerprint (same value the
+  QZ Tray trust dialog shows) and SHA-256.
+- `qz:certificate:import` — installs an existing pair as the QZ signing pair.
+  Accepts a PEM pair (`--cert=`/`--key=`, e.g. a Let's Encrypt
+  `fullchain.pem` + `privkey.pem` — removes the "Untrusted website" prompt
+  entirely) or an exported `.pfx` (`--pfx=`/`--password=` — one shared
+  self-signed keypair across all subdomains = "Always Allow" clicked once per
+  machine). Validates cert↔key match and expiry, warns on leaf-only chains,
+  backs up the previous pair, prints tailored trust guidance.
+- `docs/multi-domain.md` — full guide: why the prompt appears per subdomain
+  (trust is keyed to certificate fingerprint, not domain), CA-cert import for
+  zero prompts, shared self-signed keypair for one-prompt setups, and
+  `QZ_CERT_PATH`/`QZ_KEY_PATH` shared-file mode for same-server vhosts.
+- `/qz/status` now reports `certificate_details`: subject/issuer CN,
+  `self_signed` flag, SHA-1 fingerprint, validity end, and whether a shared
+  `QZ_CERT_PATH` is in use — for verifying all subdomains present the same
+  keypair.
+- `qz:doctor` now shows the certificate fingerprint, issuer, self-signed
+  status, and a certificate↔key match check with actionable remediation text.
+
+### Fixed
+- **qz:install printed a self-hosted script that 404'd on fresh installs, and
+  kept the CDN line (double-load).** The next-steps output suggested loading
+  the CDN *and* `vendor/qz-tray/js/qz-tray.min.js` — the latter was not tracked
+  in git, so following the printed instructions 404'd the QZ Tray library on
+  fresh installs and double-loaded it where both lines were kept. Output now
+  shows ONLY the self-hosted pair (`vendor/qz-tray/js/qz-tray.min.js` +
+  `smart-print.js`), and the minified file actually ships (see Added).
+- `smart.blade.php` loaded the QZ Tray library from the jsDelivr CDN —
+  breaks offline/LAN/intranet installs and pins an uncontrolled third-party
+  origin. Now self-hosted from the published package assets, consistent with
+  `default.blade.php`/`example.blade.php`.
+- `smart-print.js` init-failed warning referenced the non-existent
+  `qz-tray.min.js`; it now prints the actual self-hosted path.
+
+### Security
+- Private-key hygiene in the new commands: exported `.pfx` files are written
+  `0600`, imported keys `0600`, backups `0600`; export/import refuse
+  mismatched cert↔key pairs; import refuses expired certificates.
+
 ## [1.2.1] — 2026-08-30
 
 Security, reliability, and idempotency patch release. Fully backward

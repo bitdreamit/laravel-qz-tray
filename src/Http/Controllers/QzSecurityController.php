@@ -86,11 +86,33 @@ class QzSecurityController extends Controller
         $keyExists  = $keyPath  && file_exists($keyPath);
         $prefix = config('qz-tray.routes.prefix', 'qz');
 
+        // v1.3.0: expose the certificate fingerprint + issuer so operators can
+        // verify that every subdomain of a project presents the SAME keypair.
+        // QZ Tray's trust prompt is keyed to the fingerprint — identical
+        // fingerprints across subdomains means clients only trust once.
+        $certDetails = null;
+        if ($certExists) {
+            $parsed = @openssl_x509_parse((string) file_get_contents($certPath));
+            if (is_array($parsed)) {
+                $sha1 = openssl_x509_fingerprint((string) file_get_contents($certPath), 'sha1');
+                $certDetails = [
+                    'subject_cn'   => $parsed['subject']['CN'] ?? null,
+                    'organization' => $parsed['subject']['O'] ?? null,
+                    'issuer_cn'    => $parsed['issuer']['CN'] ?? null,
+                    'self_signed'  => (isset($parsed['subject'], $parsed['issuer'])) ? $parsed['subject'] === $parsed['issuer'] : null,
+                    'fingerprint_sha1' => $sha1 ? implode(':', str_split($sha1, 2)) : null,
+                    'valid_to'     => isset($parsed['validTo_time_t']) ? date('c', $parsed['validTo_time_t']) : null,
+                    'shared_path'  => $certPath !== storage_path('qz/digital-certificate.txt'),
+                ];
+            }
+        }
+
         return response()->json([
             'success'     => true,
             'status'      => ($certExists && $keyExists) ? 'operational' : 'degraded',
             'certificate' => $certExists ? 'present' : 'missing',
             'private_key' => $keyExists  ? 'present' : 'missing',
+            'certificate_details' => $certDetails,
             'endpoints'   => [
                 'certificate' => url("/{$prefix}/certificate"),
                 'sign'        => url("/{$prefix}/sign"),

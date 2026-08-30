@@ -43,11 +43,17 @@ class InstallQzTray extends Command
         $this->info('📋 Next Steps:');
         $this->line('  1. Download & install QZ Tray on client machines: https://qz.io/download');
         $this->line('  2. Run migrations: php artisan migrate');
-        $this->line('  3. Add to your layout:');
-        $this->line('       <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js"></script>');
+        $this->line('  3. Add to your layout — fully SELF-HOSTED (no CDN; works offline & on LANs):');
         $this->line('       <script src="{{ asset(\'vendor/qz-tray/js/qz-tray.min.js\') }}"></script>');
         $this->line('       <script src="{{ asset(\'vendor/qz-tray/js/smart-print.js\') }}"></script>');
+        $this->line('     (qz-tray.min.js ships with this package — published to public/vendor/qz-tray/js/)');
         $this->line('  4. Visit: /qz/status  to verify your setup');
+        $this->line('  5. Using MULTIPLE SUBDOMAINS? The trust prompt is per-certificate — share ONE');
+        $this->line('     certificate across all of them so clients only click "Always Allow" once:');
+        $this->line('       here:  php artisan qz:certificate:export   (then import on each subdomain)');
+        $this->line('       or:    php artisan qz:certificate:import --cert=fullchain.pem --key=privkey.pem');
+        $this->line('              (a real CA cert — e.g. your Let\'s Encrypt fullchain — removes the prompt entirely)');
+        $this->line('     Full guide: docs/multi-domain.md');
         $this->newLine();
 
         return self::SUCCESS;

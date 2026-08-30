@@ -193,10 +193,8 @@ Add these two lines to your main Blade layout (e.g. `resources/views/layouts/app
 <body>
     {{-- Your content here --}}
 
-    {{-- Step 1: QZ Tray WebSocket library (CDN) --}}
-    <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js"></script>
-    or
-    <script src="{{asset('vendor/qz-tray/js/qz-tray.min.js')}}"></script>
+    {{-- Step 1: QZ Tray WebSocket library — SELF-HOSTED, ships with this package --}}
+    <script src="{{ asset('vendor/qz-tray/js/qz-tray.min.js') }}"></script>
 
     {{-- Step 2: SmartPrint library (published asset) --}}
     <script src="{{ asset('vendor/qz-tray/js/smart-print.js') }}"></script>
@@ -276,7 +274,7 @@ After installing, QZ Tray starts automatically with Windows/macOS and runs in th
 | `qz-config` | `php artisan vendor:publish --tag=qz-config` | `config/qz-tray.php` | `config/qz-tray.php` |
 | `qz-migrations` | `php artisan vendor:publish --tag=qz-migrations` | `qz_print_jobs` + `qz_printer_preferences` migrations | `database/migrations/` |
 | `qz-blade` | `php artisan vendor:publish --tag=qz-blade` | Demo/test Blade views (`smart.blade.php`, `default.blade.php`, `example.blade.php`) | `resources/views/vendor/qz-tray/` |
-| `qz-assets` | `php artisan vendor:publish --tag=qz-assets` | `smart-print.js`, `printer-switcher.js`, `printer-status.js`, adapters, the vendored `qz-tray.js`, CSS, fonts | `public/vendor/qz-tray/` |
+| `qz-assets` | `php artisan vendor:publish --tag=qz-assets` | `smart-print.js`, `printer-switcher.js`, `printer-status.js`, adapters, the vendored `qz-tray.min.js` (+ unminified `qz-tray.js`), CSS, fonts | `public/vendor/qz-tray/` |
 | `qz-installers` | `php artisan vendor:publish --tag=qz-installers` | QZ Tray desktop installers (Windows/macOS/Linux), if bundled | `public/vendor/qz-tray/installers/` |
 
 Publish everything at once without the installer command's certificate-generation step:
@@ -478,6 +476,37 @@ php artisan qz:generate-certificate --force
 
 > **Security:** The `storage/qz/` directory should not be web-accessible. Laravel's `storage/` folder is not served by default — this is correct.
 
+### Multiple subdomains / eliminating the "Untrusted website" prompt
+
+QZ Tray's trust prompt is keyed to the **certificate fingerprint, not the domain**.
+Each `qz:generate-certificate` run on a different vhost creates a different
+self-signed certificate — that's why every subdomain shows its own
+"Untrusted website" dialog. Three ways to fix it:
+
+1. **Import a real CA certificate (recommended — no prompt at all):**
+   ```bash
+   php artisan qz:certificate:import \
+       --cert=/etc/letsencrypt/live/app.example.com/fullchain.pem \
+       --key=/etc/letsencrypt/live/app.example.com/privkey.pem
+   ```
+   Use the **fullchain** file (leaf + intermediates). A wildcard cert covers
+   every subdomain at once.
+2. **Share one self-signed keypair across all subdomains** (one "Always Allow"
+   click per client machine, then all subdomains trusted):
+   ```bash
+   # main domain        → php artisan qz:certificate:export
+   # each subdomain     → php artisan qz:certificate:import --pfx=... --password=...
+   ```
+3. **Same server? Point every site's `.env` at the same files:**
+   ```dotenv
+   QZ_CERT_PATH=/home/shared/qz/digital-certificate.txt
+   QZ_KEY_PATH=/home/shared/qz/private-key.pem
+   ```
+
+Verify everywhere with `php artisan qz:doctor` — identical SHA-1 fingerprints
+across subdomains = one trust decision covers them all. Full guide:
+[docs/multi-domain.md](docs/multi-domain.md).
+
 ---
 
 ## Artisan Commands
@@ -490,6 +519,10 @@ php artisan qz:generate-certificate --force
 | `php artisan qz:generate-certificate` | Generate SSL certificate |
 | `php artisan qz:generate-certificate --force` | Force regenerate certificate |
 | `php artisan qz:generate-certificate --show` | Show certificate details |
+| `php artisan qz:certificate:export` | Export cert + key as password-protected `.pfx` for sharing across subdomains |
+| `php artisan qz:certificate:import` | Import a CA-signed fullchain or a shared `.pfx` as the QZ signing pair |
+| `php artisan qz:doctor` | Installation health check (cert fingerprint/issuer/expiry, DB tables, config) |
+| `php artisan qz:prune-jobs` | Prune old `qz_print_jobs` rows (`--older-than`, `--status`, `--keep`, `--dry-run`) |
 | `php artisan qz:clear-cache` | Clear stored printer preferences (`qz_printer_preferences` table) for the requesting identity |
 | `php artisan qz:clear-cache --session` | Also clear session-scoped printer data |
 | `php artisan qz:clear-cache --all` | Clear everything, including session data |
@@ -853,7 +886,7 @@ SmartPrint.on('connected', function(data) {
 | `cache-cleared` | — | Printer cache was cleared |
 | `settings-updated` | `{ settings }` | Settings changed |
 | `ready` | `{ printers }` | SmartPrint fully initialized |
-| `init-failed` | `{ reason }` | qz-tray.min.js not loaded on page |
+| `init-failed` | `{ reason }` | QZ Tray library not loaded on page (add `vendor/qz-tray/js/qz-tray.min.js` before `smart-print.js`) |
 
 **Remove an event listener:**
 ```javascript
@@ -1604,7 +1637,8 @@ your-laravel-app/
     └── vendor/
         └── qz-tray/
             ├── js/
-            │   ├── qz-tray.js          ← QZ Tray WebSocket library
+            │   ├── qz-tray.min.js      ← QZ Tray WebSocket library (minified, 2.2.6)
+            │   ├── qz-tray.js          ← same library, unminified source
             │   ├── smart-print.js      ← SmartPrint library ⭐
             │   ├── printer-status.js   ← Printer status widget
             │   ├── printer-switcher.js ← Printer switcher widget
