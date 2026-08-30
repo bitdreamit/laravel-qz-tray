@@ -1058,12 +1058,12 @@ Route::middleware(['auth', 'can:print'])->group(function () {
     <h5>Shipment #{{ $shipment->tracking_number }}</h5>
     
     <button class="btn btn-primary"
-            onclick="printShippingLabel({{ $shipment->id }})">
+            onclick="printShippingLabel('{{ $shipment->id }}')">
         <i class="fas fa-tag"></i> Print Label
     </button>
     
     <button class="btn btn-secondary"
-            onclick="printPackingSlip({{ $shipment->id }})">
+            onclick="printPackingSlip('{{ $shipment->id }}')">
         <i class="fas fa-clipboard-list"></i> Packing Slip
     </button>
 </div>
