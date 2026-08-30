@@ -32,6 +32,10 @@ compatible — additive commands and config keys only.
   (trust is keyed to certificate fingerprint, not domain), CA-cert import for
   zero prompts, shared self-signed keypair for one-prompt setups, and
   `QZ_CERT_PATH`/`QZ_KEY_PATH` shared-file mode for same-server vhosts.
+  Includes a **Cloudflare section**: how a free Cloudflare Origin Certificate
+  (wildcard, up to 15 years) doubles as the shared QZ signing pair — one
+  "Always Allow" per client machine — and why it cannot silence the dialog
+  the way a publicly trusted cert does.
 - `/qz/status` now reports `certificate_details`: subject/issuer CN,
   `self_signed` flag, SHA-1 fingerprint, validity end, and whether a shared
   `QZ_CERT_PATH` is in use — for verifying all subdomains present the same

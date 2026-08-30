@@ -504,8 +504,12 @@ self-signed certificate — that's why every subdomain shows its own
    ```
 
 Verify everywhere with `php artisan qz:doctor` — identical SHA-1 fingerprints
-across subdomains = one trust decision covers them all. Full guide:
-[docs/multi-domain.md](docs/multi-domain.md).
+across subdomains = one trust decision covers them all.
+
+Sites behind **Cloudflare**? Your free Origin Certificate
+(`*.yourdomain.com`, valid up to 15 years) can double as the shared QZ
+certificate — see ["Using Cloudflare"](docs/multi-domain.md#using-cloudflare-your-origin-certificate-is-a-shortcut).
+Full guide: [docs/multi-domain.md](docs/multi-domain.md).
 
 ---
 

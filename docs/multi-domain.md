@@ -170,6 +170,77 @@ the shared fingerprint and marks `shared_path: true` in `/qz/status`.
 
 ---
 
+## Using Cloudflare? Your Origin Certificate is a shortcut
+
+If your sites sit behind Cloudflare (orange cloud), **three different
+certificates** are in play and only one of them matters for QZ Tray:
+
+| Certificate | Who trusts it | What it does | Effect on the QZ prompt |
+|---|---|---|---|
+| Cloudflare edge cert (Universal SSL) | every browser | Visitors ↔ Cloudflare TLS | None — QZ Tray never sees it |
+| **Cloudflare Origin Certificate** (e.g. `*.advmedi.com, advmedi.com`, valid to Feb 2041) | Cloudflare **only** | Cloudflare ↔ your server TLS | Not publicly trusted — QZ still shows "Untrusted website" once |
+| QZ site certificate (`storage/qz/digital-certificate.txt`) | QZ Tray | Signs print requests | **This is the one causing your popups** |
+
+### The good news
+
+A Cloudflare Origin Certificate is **not** publicly trusted (it chains to
+Cloudflare's own CA, which is deliberately not in browser or Java trust
+stores), so importing it does **not** make QZ Tray silent the way a real CA
+cert would. But it is still the most convenient multi-subdomain cert you
+own, because:
+
+- it is a **wildcard** — covers `advmedi.com` and every `*.advmedi.com`
+  subdomain in one file;
+- it is valid for **up to 15 years** (yours expires Feb 20, 2041) — no
+  renewal churn, unlike Let's Encrypt's ~60–90 day cycle;
+- shared across all vhosts it gives every subdomain the **same SHA-1
+  fingerprint** → users click **Always Allow** once per client machine and
+  every subdomain is trusted from then on.
+
+### How to use it as the QZ certificate
+
+1. Get the Origin Certificate **and its private key** as PEM:
+   - Cloudflare dashboard → SSL/TLS → Origin Server → *Create Certificate*
+     (the private key is shown once — copy both blocks), or
+   - cPanel → SSL/TLS → Certificates, if you installed it there.
+   - Lost the key? Just create a fresh Origin Certificate — it is free and
+     takes a minute.
+2. Save both files to a shared location, e.g.
+   `/home/qz-shared/origin.crt` + `/home/qz-shared/origin.key`
+   (permissions as in Option C: 644 for the cert, 640 for the key).
+3. Point every subdomain's `.env` at the **same pair**:
+   ```dotenv
+   QZ_CERT_PATH=/home/qz-shared/origin.crt
+   QZ_KEY_PATH=/home/qz-shared/origin.key
+   ```
+   then `php artisan config:clear && php artisan config:cache` on each site.
+4. Run `php artisan qz:doctor` on each subdomain — all must print the same
+   fingerprint. (The importer warns that the leaf has no intermediate chain —
+   that is expected for Origin Certificates and harmless here.)
+5. On each client machine, open any subdomain and click **Always Allow** in
+   the QZ dialog once. Every subdomain is then trusted until Feb 2041 — or
+   until you issue a *new* Origin Certificate, which changes the fingerprint
+   and costs one more approval per machine.
+
+### Want zero prompts instead?
+
+Import a **publicly trusted** certificate (Option A — cPanel AutoSSL /
+Let's Encrypt `fullchain.pem` + `privkey.pem`). QZ Tray then trusts every
+subdomain silently with no dialog at all. The trade-off on cPanel: AutoSSL
+renews every ~60–90 days and the copy imported into QZ must be refreshed
+after each renewal (re-run the import, or a small cron), otherwise the
+served copy eventually expires and the prompt returns. The 15-year Origin
+Certificate avoids that maintenance entirely, at the cost of one
+"Always Allow" click per client machine.
+
+> **Cloudflare settings worth checking** (not QZ-specific): with a valid
+> origin cert installed, set SSL/TLS mode to **Full (strict)**; leave
+> Authenticated Origin Pulls off unless you deliberately use it; no extra
+> cache rules are needed for `/qz/certificate` and `/qz/sign` (dynamic
+> routes are not cached by default).
+
+---
+
 ## Verifying across subdomains
 
 On every subdomain run:
