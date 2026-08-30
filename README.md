@@ -195,6 +195,8 @@ Add these two lines to your main Blade layout (e.g. `resources/views/layouts/app
 
     {{-- Step 1: QZ Tray WebSocket library (CDN) --}}
     <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js"></script>
+    or
+    <script src="{{asset('vendor/qz-tray/js/qz-tray.min.js')}}"></script>
 
     {{-- Step 2: SmartPrint library (published asset) --}}
     <script src="{{ asset('vendor/qz-tray/js/smart-print.js') }}"></script>

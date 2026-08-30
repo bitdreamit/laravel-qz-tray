@@ -45,6 +45,7 @@ class InstallQzTray extends Command
         $this->line('  2. Run migrations: php artisan migrate');
         $this->line('  3. Add to your layout:');
         $this->line('       <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js"></script>');
+        $this->line('       <script src="{{ asset(\'vendor/qz-tray/js/qz-tray.min.js\') }}"></script>');
         $this->line('       <script src="{{ asset(\'vendor/qz-tray/js/smart-print.js\') }}"></script>');
         $this->line('  4. Visit: /qz/status  to verify your setup');
         $this->newLine();

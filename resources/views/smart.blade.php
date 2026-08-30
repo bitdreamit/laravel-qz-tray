@@ -215,7 +215,8 @@
 </div>
 
 {{-- QZ Tray library (CDN) --}}
-<script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js"></script>
+{{--<script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.6/qz-tray.min.js"></script>--}}
+<script src="{{asset('vendor/qz-tray/js/qz-tray.min.js')}}"></script>
 {{-- Laravel QZ Tray smart-print library --}}
 <script src="{{ asset('vendor/qz-tray/js/smart-print.js') }}"></script>
 
