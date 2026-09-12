@@ -13,7 +13,7 @@ class QzTrayServiceProvider extends ServiceProvider
      * agree with composer.json (the previous hardcoded '1.0.0' in the
      * controller drifted from the real version). Bump on every release.
      */
-    public const VERSION = '1.4.0';
+    public const VERSION = '1.4.1';
 
     public function boot(): void
     {
@@ -57,33 +57,34 @@ class QzTrayServiceProvider extends ServiceProvider
             $this->autoGenerateCertificate();
         }
 
-        if ($this->app->runningInConsole()) {
-            $this->commands([
-                Console\Commands\InstallQzTray::class,
-                Console\Commands\GenerateCertificate::class,
-                Console\Commands\GenerateCa::class,
-                Console\Commands\ClearQzCache::class,
-                Console\Commands\PrunePreferences::class,
-                Console\Commands\PruneJobs::class,
-                Console\Commands\QzDoctor::class,
-                Console\Commands\ExportCertificate::class,
-                Console\Commands\ImportCertificate::class,
-                Console\Commands\ExportOverride::class,
-                Console\Commands\ClientBundle::class,
-                Console\Commands\WatchCertificate::class,
-            ]);
+        // v1.4.1: register commands unconditionally. Artisan::call() from HTTP
+        // context (the /qz/client-bundle on-demand rebuild) must be able to
+        // resolve qz:client-bundle even when runningInConsole() is false.
+        $this->commands([
+            Console\Commands\InstallQzTray::class,
+            Console\Commands\GenerateCertificate::class,
+            Console\Commands\GenerateCa::class,
+            Console\Commands\ClearQzCache::class,
+            Console\Commands\PrunePreferences::class,
+            Console\Commands\PruneJobs::class,
+            Console\Commands\QzDoctor::class,
+            Console\Commands\ExportCertificate::class,
+            Console\Commands\ImportCertificate::class,
+            Console\Commands\ExportOverride::class,
+            Console\Commands\ClientBundle::class,
+            Console\Commands\WatchCertificate::class,
+        ]);
 
-            // v1.4.0: auto-schedule the certificate watcher when an external
-            // source is configured, so Let's Encrypt renewals re-import
-            // without anyone remembering to run artisan by hand.
-            if (config('qz-tray.certificate.watch.source_cert')) {
-                $this->app->afterResolving('schedule', function ($schedule) {
-                    $schedule->command('qz:watch-certificate')
-                        ->dailyAt((string) config('qz-tray.certificate.watch.schedule_time', '03:17'))
-                        ->withoutOverlapping()
-                        ->runInBackground();
-                });
-            }
+        // v1.4.0: auto-schedule the certificate watcher when an external
+        // source is configured, so Let's Encrypt renewals re-import
+        // without anyone remembering to run artisan by hand.
+        if ($this->app->runningInConsole() && config('qz-tray.certificate.watch.source_cert')) {
+            $this->app->afterResolving('schedule', function ($schedule) {
+                $schedule->command('qz:watch-certificate')
+                    ->dailyAt((string) config('qz-tray.certificate.watch.schedule_time', '03:17'))
+                    ->withoutOverlapping()
+                    ->runInBackground();
+            });
         }
     }
 

@@ -153,7 +153,19 @@ class QzSecurityController extends Controller
         $needsBuild  = ! is_file($zipPath) || ! is_file($stampPath) || file_get_contents($stampPath) !== $certStamp;
 
         if ($needsBuild) {
-            \Artisan::call('qz:client-bundle', ['--force' => true, '--zip' => true]);
+            try {
+                \Artisan::call('qz:client-bundle', ['--force' => true, '--zip' => true]);
+            } catch (\Throwable $e) {
+                report($e);
+                // v1.4.1: fall back to the previously built bundle instead of
+                // a hard 500. The trust root (CA) does not change on leaf
+                // rotation, so a stale zip remains valid for client trust.
+                // Only abort when nothing was ever built.
+                if (! is_file($zipPath)) {
+                    abort(500, 'Client bundle rebuild failed: '.$e->getMessage()
+                        .' — run: php artisan qz:client-bundle --zip');
+                }
+            }
         }
 
         if (! is_file($zipPath)) {

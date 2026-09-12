@@ -1,0 +1,127 @@
+============================================================================
+ QZ TRAY ZERO-PROMPT - EASY RUNBOOK (package v1.4.0)
+ Foolproof step-by-step. Every step is safe to re-run (idempotent).
+ Total time: server 10 min + 1 test PC 5 min + 30 sec per other PC.
+============================================================================
+
+WHAT YOU NEED BEFORE STARTING
+  [1] Laravel server with shell access (SSH or terminal), PHP 8.1+
+  [2] One root domain that covers all tenants, e.g.  example.com
+      - tenant1.example.com, tenant2.example.com ...  -> wildcard *.example.com
+  [3] Windows 10/11 PCs with QZ Tray 2.2.x installed (https://qz.io/download)
+  [4] Admin rights on the Windows PCs (one right-click)
+
+DECIDED IN 10 SECONDS
+  Clients will trust your ROOT CA once. The wildcard leaf certificate can
+  change/renew as often as it wants - clients never need updating again.
+
+----------------------------------------------------------------------------
+PHASE 1 - SERVER: CREATE THE CERTIFICATE CHAIN  (one time, 4 commands)
+----------------------------------------------------------------------------
+cd /path/to/your-laravel-app
+
+  1)  php artisan qz:generate-ca
+      -> creates your own root CA (like being your own free certificate
+         authority). Prints the CA fingerprint. Note it down.
+
+  2)  php artisan qz:generate-certificate --ca --domain=*.example.com
+      -> creates the wildcard leaf certificate SIGNED BY that CA and
+         wires it into the package config automatically.
+         Replace example.com with YOUR root domain.
+
+  3)  php artisan qz:doctor
+      -> must show the certificate/trust checks green.
+         If it reports an issue, fix what it names and re-run steps 1-3.
+         Nothing else in later phases can fail while doctor is green.
+
+  4)  php artisan qz:watch-certificate --schedule   (usually auto-registered)
+      -> from now on leaf renewals propagate on their own.
+
+CHECKPOINT 1: qz:doctor is green.  Do not continue before this is true.
+
+----------------------------------------------------------------------------
+PHASE 2 - SERVER: BUILD THE CLIENT BUNDLE  (one time, 1 command)
+----------------------------------------------------------------------------
+  5)  php artisan qz:client-bundle --zip
+      -> prints the zip path and its download URL, something like:
+             /qz/client-bundle
+         The zip contains: setup.bat, the PowerShell installer, your
+         override.crt, provision.json and a small README.
+
+CHECKPOINT 2: the zip downloads and contains setup.bat.
+
+----------------------------------------------------------------------------
+PHASE 3 - ONE TEST PC: PROVE ZERO PROMPTS  (one time, 5 min)
+----------------------------------------------------------------------------
+On ONE Windows PC that prints (not your own dev box ideally):
+
+  6)  Install QZ Tray 2.2.x if not installed yet. Start it once
+      (so it generates its localhost root), leave it running.
+
+  7)  Download the bundle zip from  https://your-app.example.com/qz/client-bundle
+      (or copy the zip file there by any means) and unzip it.
+
+  8)  Right-click  setup.bat  ->  Run as administrator  ->  accept UAC.
+      The script: imports the QZ localhost root (stops wss warnings),
+      installs your CA as override.crt (stops the Allow dialog),
+      adds authcert.override to qz-tray.properties, adds the Chrome/Edge
+      local-network policy for your domain, restarts QZ Tray.
+
+  9)  Open a tenant site, e.g. https://tenant1.example.com  in Chrome/Edge
+      and print a test page.
+
+CHECKPOINT 3: printing happened with NO "Allow" dialog and NO
+              "local network" prompt. If a prompt appeared, see the
+              TROUBLESHOOTING table below, fix, re-run setup.bat.
+
+----------------------------------------------------------------------------
+PHASE 4 - ROLL OUT TO ALL PCs  (30 seconds each)
+----------------------------------------------------------------------------
+Give every user the same zip with ONE instruction:
+
+   "Unzip, right-click setup.bat, Run as administrator, accept UAC. Done."
+
+  OR deploy it silently with GPO / SCCM / Intune as a startup script
+  (the underlying qz-client-setup.ps1 is designed for that).
+
+No per-user action, no QZ login, no certificate dialogs - ever.
+
+----------------------------------------------------------------------------
+PHASE 5 - KEEP IT RUNNING  (nothing to do, just know this)
+----------------------------------------------------------------------------
+  - New tenant subdomain?  Already covered by *.example.com. Nothing to do.
+  - Certificate renewed?   watch-certificate syncs it. Clients unaffected -
+                           they trust the CA, not the leaf.
+  - QZ Tray upgraded on a PC?  Re-run setup.bat once on that PC (idempotent).
+  - Want to start over?    Re-run phases 1-2, then setup.bat on each PC.
+
+----------------------------------------------------------------------------
+TROUBLESHOOTING - ONLY 5 THINGS CAN GO WRONG
+----------------------------------------------------------------------------
+SYMPTOM                          CAUSE                        FIX
+----------------------------------------------------------------------------
+"Untrusted website / Allow"      setup.bat not run on that    Run it as admin,
+still appears                    PC, or tray not restarted    re-print
+
+Allow dialog on ONE new PC only  that PC missed the bundle    run setup.bat there
+
+Browser warns about              QZ Tray never started on     Start QZ Tray once,
+wss://localhost:8181             that PC before setup         re-run setup.bat
+
+Chrome/Edge asks "wants to       browser not restarted yet    restart browser;
+access your local network"       after policy was added       verify in
+                                 or wrong domain configured   qz:doctor + config
+
+Wizard /qz/setup shows           served cert and deployed     re-run step 2, then
+fingerprint mismatch             CA do not match              setup.bat again
+
+----------------------------------------------------------------------------
+QUICK VERIFY ANYTIME
+----------------------------------------------------------------------------
+  Server side:   php artisan qz:doctor          (all green?)
+                 https://your-app/qz/setup      (wizard shows trust panel)
+  Client side:   "C:\Program Files\QZ Tray\override.crt" exists?
+                 Print a test page -> no dialogs.
+  Rollback:      restore "C:\Program Files\QZ Tray\override.crt.bak"
+                 and re-run setup.bat-free state by deleting override.crt.
+============================================================================

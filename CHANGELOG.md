@@ -3,6 +3,21 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.1] — 2026-09-13
+
+### Fixed
+- **HTTP bundle download could 500** ("command does not exist"): the service
+  provider registered artisan commands only when `runningInConsole()`, so the
+  on-demand rebuild inside `GET /qz/client-bundle` (triggered whenever the
+  signing certificate changed since the last build) failed with
+  `CommandNotFoundException` in web context. Commands are now registered
+  unconditionally; the watcher auto-schedule stays console-only.
+- `GET /qz/client-bundle` now falls back to serving the previously built zip
+  when the on-demand rebuild throws (e.g. storage permission issues) instead
+  of aborting with 500 — the CA trust root does not change on leaf rotation,
+  so a stale bundle remains valid for client trust. Only aborts when no zip
+  was ever built.
+
 ## [1.4.0] — 2026-09-13
 
 **Zero-Prompt release.** Eliminates every QZ Tray dialog (browser TLS warning,
