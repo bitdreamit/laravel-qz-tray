@@ -26,6 +26,19 @@ return [
     |--------------------------------------------------------------------------
     | Certificate Generation Settings
     |--------------------------------------------------------------------------
+    | v1.4.0 zero-prompt additions:
+    |   san_domains  — SANs baked into every generated certificate when the
+    |                  --domain option is omitted. ONE wildcard certificate
+    |                  (e.g. *.yourdomain.com) covers ALL tenant subdomains,
+    |                  so every host presents the identical fingerprint.
+    |   ca.*         — the project's OWN Root CA (qz:generate-ca). Deploy its
+    |                  certificate to clients as QZ Tray's override.crt and
+    |                  leaves signed by it are trusted SILENTLY — the paid-QZ-
+    |                  certificate prompt disappears, 100% free.
+    |   watch.*      — sync the signing pair from an external source
+    |                  (Let's Encrypt fullchain, cPanel AutoSSL, Cloudflare
+    |                  Origin). When the source renews, qz:watch-certificate
+    |                  re-imports automatically (schedule it daily).
     */
     'certificate' => [
         'validity_days' => 7300,
@@ -43,6 +56,27 @@ return [
             'organizationalUnitName' => 'Bit Dream IT',
             'commonName'             => 'Laravel QZ Tray',
             'emailAddress'           => 'info@bitdreamit.com',
+        ],
+
+        // v1.4.0: wildcard SANs for multi-tenant zero-prompt sharing, e.g.
+        //   QZ_SAN_DOMAINS=*.myshop.example,myshop.example
+        'san_domains' => env('QZ_SAN_DOMAINS') ? explode(',', (string) env('QZ_SAN_DOMAINS')) : [],
+
+        // v1.4.0: the project's own Root CA (qz:generate-ca).
+        'ca' => [
+            'cert_path'     => env('QZ_CA_CERT_PATH', storage_path('qz/ca/qz-root-ca.crt')),
+            'key_path'      => env('QZ_CA_KEY_PATH',  storage_path('qz/ca/qz-root-ca.key')),
+            'validity_days' => env('QZ_CA_VALIDITY_DAYS', 7300),
+        ],
+
+        // v1.4.0: external certificate source for automatic re-import after
+        // Let's Encrypt / AutoSSL renewals (qz:watch-certificate).
+        'watch' => [
+            'source_cert' => env('QZ_WATCH_CERT'), // e.g. /etc/letsencrypt/live/app.example.com/fullchain.pem
+            'source_key'  => env('QZ_WATCH_KEY'),  // e.g. /etc/letsencrypt/live/app.example.com/privkey.pem
+            'warn_days'   => (int) env('QZ_CERT_WARN_DAYS', 30),
+            // When source_cert is set, the provider schedules the watcher daily.
+            'schedule_time' => env('QZ_WATCH_TIME', '03:17'),
         ],
     ],
 
@@ -69,6 +103,28 @@ return [
     | removing this endpoint entirely in a future major release.
     */
     'allow_public_cert_generate' => env('QZ_ALLOW_PUBLIC_CERT_GENERATE', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Client Trust Bundle (v1.4.0 — zero-prompt deployment)
+    |--------------------------------------------------------------------------
+    | `qz:client-bundle` builds a Windows deployment folder/zip:
+    |   override.crt + qz-client-setup.ps1 + setup.bat + provision.json.
+    | The PowerShell script, run once per client as admin, installs ALL trust
+    | silently: QZ Tray's localhost root into the Windows Root store (no
+    | browser TLS warning), override.crt into the QZ Tray folder (no signing
+    | prompt), an allowed.dat whitelist entry, and the Chrome/Edge
+    | LocalNetworkAccess policy (no "wants to access your local network"
+    | prompt in Chrome 138+).
+    */
+    'client_bundle' => [
+        // Tenant domains for the Chrome/Edge LocalNetworkAccess policy, e.g.
+        //   QZ_LNA_DOMAINS=*.myshop.example,myshop.example
+        'lna_domains' => env('QZ_LNA_DOMAINS') ? explode(',', (string) env('QZ_LNA_DOMAINS')) : [],
+        'restart_tray' => env('QZ_BUNDLE_RESTART_TRAY', true),
+        // Default the allowed.dat step to ON (harmless, extra belt & suspenders)
+        'include_allow' => env('QZ_BUNDLE_INCLUDE_ALLOW', true),
+    ],
 
     /*
     |--------------------------------------------------------------------------
@@ -212,6 +268,11 @@ return [
         'prefix'     => 'qz',
         'middleware' => ['web'],
         'throttle'   => '60,1',
+        // v1.4.0: the /qz/ca-certificate and /qz/client-bundle downloads serve
+        // PUBLIC certificate material only (no private keys) but can be turned
+        // off when the bundle is distributed out-of-band (GPO/Intune/scp).
+        'serve_ca'     => env('QZ_SERVE_CA_CERT', true),
+        'serve_bundle' => env('QZ_SERVE_BUNDLE', true),
         // API routes (routes/api.php) are disabled by default. Enable only
         // when you need a stateless, sanctum-protected surface.
         'api' => [

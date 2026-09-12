@@ -20,6 +20,14 @@ Route::group([
     Route::get('/certificate', [QzSecurityController::class, 'certificate'])
         ->name('qz.certificate');
 
+    // v1.4.0: download the trust root clients deploy as QZ Tray override.crt
+    Route::get('/ca-certificate', [QzSecurityController::class, 'caCertificate'])
+        ->name('qz.ca-certificate');
+
+    // v1.4.0: download the ready-made Windows client trust bundle (.zip)
+    Route::get('/client-bundle', [QzSecurityController::class, 'clientBundle'])
+        ->name('qz.client-bundle');
+
     Route::post('/sign', [QzSecurityController::class, 'sign'])
         ->name('qz.sign');
 
@@ -69,6 +77,10 @@ Route::group([
 
     Route::post('/setup', [QzSecurityController::class, 'setup'])
         ->name('qz.setup');
+
+    // v1.4.0: browser-facing Client Setup Wizard (same URI, GET verb)
+    Route::get('/setup', [QzSecurityController::class, 'wizard'])
+        ->name('qz.setup.wizard');
 
     Route::post('/test-sign', [QzSecurityController::class, 'testSign'])->name('qz.test-sign');
 

@@ -132,6 +132,33 @@ class QzDoctor extends Command
             $issues++;
         }
 
+        // 9. (v1.4.0) Zero-prompt trust posture
+        if ($certOk) {
+            $caCertPath  = (string) (config('qz-tray.certificate.ca.cert_path') ?: storage_path('qz/ca/qz-root-ca.crt'));
+            $hasCa       = is_file($caCertPath);
+            $certPem     = (string) file_get_contents((string) $certPath);
+            $chains      = $hasCa ? \Bitdreamit\QzTray\Support\CertKit::leafChainsTo($certPem, (string) file_get_contents($caCertPath)) : false;
+            $selfSigned  = \Bitdreamit\QzTray\Support\CertKit::isSelfSigned($certPem);
+
+            $mode = $selfSigned ? 'self-signed' : 'public-ca';
+            if ($hasCa && $chains) {
+                $mode = 'own-ca (zero-prompt once override.crt deployed)';
+            }
+
+            $checks[] = ['Trust mode (v1.4.0)', $mode, true];
+
+            // Informational: a shared self-signed pair + "Always Allow" is a
+            // valid posture too, so readiness never hard-fails the doctor.
+            if ($mode === 'self-signed') {
+                $checks[] = ['Zero-prompt readiness', 'INFORMATIONAL — for zero prompts run qz:generate-ca + qz:generate-certificate --ca, or import a real CA cert (docs/zero-prompt.md)', true];
+            } else {
+                $checks[] = ['Zero-prompt readiness', $mode === 'public-ca' ? 'READY — public chain, QZ Tray trusts silently' : 'READY — deploy override.crt bundle to clients (qz:client-bundle)', true];
+            }
+
+            $watch = (string) config('qz-tray.certificate.watch.source_cert', '');
+            $checks[] = ['Renewal watcher', $watch !== '' ? "enabled ({$watch})" : 'not configured — expiry reported by qz:watch-certificate only', true];
+        }
+
         $prefix = config('qz-tray.routes.prefix', 'qz');
         $checks[] = ['Route prefix', "/{$prefix}", true];
         $checks[] = ['API routes', config('qz-tray.routes.api.enabled', false) ? 'enabled' : 'disabled (default)', true];

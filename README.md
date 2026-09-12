@@ -405,6 +405,34 @@ return [
 
 The certificate allows QZ Tray to trust your website. It is a self-signed SSL certificate generated on your server — **only the public certificate is sent to the browser; the private key never leaves your server.**
 
+### Zero-Prompt Trust — v1.4.0 (NEW)
+
+Tired of the "Untrusted website / Allow" dialog on every client? v1.4.0 ships a complete, **100% free** zero-prompt toolkit. Pick ONE path:
+
+**Path A — real CA certificate (Let's Encrypt / cPanel AutoSSL): QZ Tray trusts it silently, zero client deployment.**
+
+```bash
+php artisan qz:certificate:import --cert=/etc/letsencrypt/live/app.example.com/fullchain.pem --key=.../privkey.pem
+# .env: QZ_WATCH_CERT=/etc/letsencrypt/live/app.example.com/fullchain.pem
+#       QZ_WATCH_KEY=/etc/letsencrypt/live/app.example.com/privkey.pem
+# → qz:watch-certificate auto-runs daily and re-imports after every renewal
+```
+
+**Path B — your own Root CA + override.crt (recommended when you control the Windows clients):**
+
+```bash
+php artisan qz:generate-ca                                                   # your own free root CA
+php artisan qz:generate-certificate --force --ca --domain=*.example.com,example.com   # wildcard leaf for ALL tenants
+php artisan qz:client-bundle --zip                                           # builds storage/qz/client-bundle/
+# → run setup.bat (admin) on each Windows client, or push qz-client-setup.ps1 via GPO/Intune.
+#   The script silently installs: localhost TLS trust (no browser warning),
+#   override.crt (no signing prompt), allowed.dat entry, Chrome/Edge LNA policy.
+```
+
+**Path C — keep self-signed:** ensure all tenants share the identical pair (v1.3.0 export/import or shared `QZ_CERT_PATH`) and click **"Always Allow"** (not plain "Allow" — that is the session-only button responsible for "prompts every time").
+
+New in v1.4.0: `qz:generate-ca`, `qz:generate-certificate --ca --domain=…`, `qz:override:export`, `qz:client-bundle`, `qz:watch-certificate`, endpoints `GET /qz/ca-certificate`, `GET /qz/client-bundle`, the browser wizard at **`GET /qz/setup`**, and `trust` posture reporting in `/qz/status`. Full guide: **[docs/zero-prompt.md](docs/zero-prompt.md)** (deep-dive with diagrams: see the package PDF).
+
 ### Generate a new certificate
 
 ```bash

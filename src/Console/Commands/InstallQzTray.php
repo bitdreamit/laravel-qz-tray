@@ -47,13 +47,15 @@ class InstallQzTray extends Command
         $this->line('       <script src="{{ asset(\'vendor/qz-tray/js/qz-tray.min.js\') }}"></script>');
         $this->line('       <script src="{{ asset(\'vendor/qz-tray/js/smart-print.js\') }}"></script>');
         $this->line('     (qz-tray.min.js ships with this package — published to public/vendor/qz-tray/js/)');
-        $this->line('  4. Visit: /qz/status  to verify your setup');
-        $this->line('  5. Using MULTIPLE SUBDOMAINS? The trust prompt is per-certificate — share ONE');
-        $this->line('     certificate across all of them so clients only click "Always Allow" once:');
-        $this->line('       here:  php artisan qz:certificate:export   (then import on each subdomain)');
-        $this->line('       or:    php artisan qz:certificate:import --cert=fullchain.pem --key=privkey.pem');
-        $this->line('              (a real CA cert — e.g. your Let\'s Encrypt fullchain — removes the prompt entirely)');
-        $this->line('     Full guide: docs/multi-domain.md');
+        $this->line('  4. Visit: /qz/status  to verify your setup   |   /qz/setup = Client Setup Wizard');
+        $this->newLine();
+        $this->info('🎯 ZERO-PROMPT setup (no "Allow" dialogs, free — v1.4.0):');
+        $this->line('  Path A (real CA):   php artisan qz:certificate:import --cert=fullchain.pem --key=privkey.pem');
+        $this->line('                      then set QZ_WATCH_CERT/QZ_WATCH_KEY → renewals auto-reimport');
+        $this->line('  Path B (own CA):    php artisan qz:generate-ca');
+        $this->line('                      php artisan qz:generate-certificate --force --ca --domain=*.yourdomain.com');
+        $this->line('                      php artisan qz:client-bundle --zip   → run setup.bat as admin on clients');
+        $this->line('  Full guide: docs/zero-prompt.md   |   Multi-subdomain sharing: docs/multi-domain.md');
         $this->newLine();
 
         return self::SUCCESS;

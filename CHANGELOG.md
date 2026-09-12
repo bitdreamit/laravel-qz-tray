@@ -3,6 +3,72 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.0] — 2026-09-13
+
+**Zero-Prompt release.** Eliminates every QZ Tray dialog (browser TLS warning,
+"Untrusted website / Allow" prompt, Chrome Local-Network-Access prompt) using
+100% free mechanisms — no paid QZ certificate required. Fully backward
+compatible: all new commands/options/endpoints are additive.
+
+### Added
+- `qz:generate-ca` — creates the project's own Root CA (`storage/qz/ca/`) with
+  proper `CA:TRUE` / `keyCertSign` extensions. The CA certificate is what
+  clients deploy as QZ Tray's `override.crt` (or `authcert.override=` /
+  provision.json `type:"ca"`); leaves signed by it are then trusted by QZ Tray
+  SILENTLY — the free equivalent of QZ Industries' paid signing certificate.
+- `qz:generate-certificate` new options:
+  - `--domain=*.example.com,example.com` — wildcard + SAN support (openssl.cnf
+    `v3_leaf` profile with `subjectAltName`). One wildcard leaf covers every
+    tenant subdomain → identical fingerprint everywhere → clients trust once.
+    `certificate.san_domains` config / `QZ_SAN_DOMAINS` env sets it persistently.
+  - `--ca` — signs the leaf with the local Root CA (falls back to self-signed
+    with a warning when no CA exists). Backups of the previous pair are kept
+    automatically (`.bak-<timestamp>`), and post-generation output now prints
+    which trust path applies.
+- `qz:override:export` — exports the file clients install as QZ Tray
+  `override.crt` (the Root CA when the leaf chains to it, else the leaf), with
+  printed deployment recipes for all four deployment mechanisms.
+- `qz:client-bundle` — builds the Windows deployment bundle
+  (`storage/qz/client-bundle/`): `override.crt`, `digital-certificate.txt`,
+  **`qz-client-setup.ps1`** (admin script that silently installs QZ Tray's
+  localhost root into the Windows Root store via certutil, deploys
+  `override.crt`, adds the site certificate to allowed.dat via
+  `qz-tray-console.exe --allow`, sets the Chrome/Edge
+  `LocalNetworkAccessAllowedForUrls` policy, and restarts QZ Tray),
+  `setup.bat` launcher, `provision.json` for QZ Tray 2.2.4+ sideloading
+  (ca + cert + chromium/firefox LNA policy entries), and a README.
+  `--zip` produces a distributable archive; `--no-lna`/`--no-allow`/
+  `--lna-domains=` tune the steps; config `client_bundle.*` / env
+  `QZ_LNA_DOMAINS` sets defaults.
+- `qz:watch-certificate` — keeps the signing pair in sync with an external
+  source (Let's Encrypt `fullchain.pem`/`privkey.pem`, cPanel AutoSSL,
+  Cloudflare Origin). Detects source changes, validates the pair, backs up and
+  atomically re-imports; without a source it reports expiry (exit 1 inside the
+  30-day warn window). Auto-scheduled daily by the service provider when
+  `certificate.watch.source_cert` is configured. This closes the last gap that
+  made the Let's Encrypt path prompt-prone: stale leaves after renewals.
+- Endpoints: `GET /qz/ca-certificate` (trust root download),
+  `GET /qz/client-bundle` (auto-rebuilding zip download), **`GET /qz/setup`**
+  (browser-facing Client Setup Wizard: server posture, fingerprint comparison,
+  live QZ Tray WebSocket probe, copy-paste trust commands, download buttons).
+- `/qz/status` and `POST /qz/setup` now report a `trust` summary:
+  `mode` = `public-ca` | `own-ca` | `self-signed`, `root_ca_present`,
+  `leaf_chains_to_root_ca` and the zero-prompt endpoint URLs.
+- `docs/zero-prompt.md` — the complete free zero-prompt guide (three
+  architectures, multi-tenant cheat sheet, rotation rules, file locations).
+- Tests: `CaChainAndBundleTest` — CA/leaf chain generation, SAN round-trip,
+  signature verification against the CA, fingerprint stability, atomic writes.
+
+### Fixed
+- `--domain` SAN parsing accepts wildcards (`FILTER_FLAG_HOSTNAME` rejects the
+  leading `*.` — now validated on the bare domain and re-attached).
+
+### Notes
+- The zero-prompt model: QZ Tray trust is (1) keyed to certificate
+  fingerprints, not domains; (2) granted silently to anything chaining to a
+  public root or to `%PROGRAMFILES%\QZ Tray\override.crt`; (3) separately
+  affected by Chrome 138+ Local Network Access. See docs/zero-prompt.md §0.
+
 ## [1.3.0] — 2026-08-30
 
 Multi-subdomain certificate sharing + fully self-hosted JS. Fully backward

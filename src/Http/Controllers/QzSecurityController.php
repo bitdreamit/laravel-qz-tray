@@ -2,10 +2,12 @@
 
 namespace Bitdreamit\QzTray\Http\Controllers;
 
+use Bitdreamit\QzTray\Support\CertKit;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class QzSecurityController extends Controller
 {
@@ -17,6 +19,55 @@ class QzSecurityController extends Controller
     public function smart()
     {
         return view('qz-tray::smart');
+    }
+
+    /**
+     * GET /qz/setup — the browser-facing Client Setup Wizard.
+     * (POST /qz/setup below keeps returning the original JSON status.)
+     *
+     * Walks the operator through QZ Tray installation + all three trust
+     * decisions (transport TLS, signing cert, Chrome LNA) with copy-paste
+     * commands, live connection probing and fingerprint comparison — the
+     * exact friction that made repeated "Allow" prompts feel unfixable.
+     */
+    public function wizard()
+    {
+        $prefix   = config('qz-tray.routes.prefix', 'qz');
+        $certPath = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
+
+        $fingerprint = null;
+        $subjectCn   = null;
+        $mode        = 'self-signed';
+        $daysLeft    = null;
+
+        if (is_file($certPath) && extension_loaded('openssl')) {
+            try {
+                $pem         = (string) file_get_contents($certPath);
+                $fingerprint = CertKit::fingerprintSha1Pretty($pem);
+                $parsed      = openssl_x509_parse($pem);
+                $subjectCn   = $parsed['subject']['CN'] ?? null;
+                $daysLeft    = CertKit::daysUntilExpiry($pem);
+                $trust       = $this->trustSummary([
+                    'self_signed' => isset($parsed['subject'], $parsed['issuer']) ? $parsed['subject'] === $parsed['issuer'] : null,
+                ]);
+                $mode = $trust['mode'];
+            } catch (\Throwable $e) {
+                // leave defaults; wizard degrades gracefully
+            }
+        }
+
+        return view('qz-tray::wizard', [
+            'fingerprint'   => $fingerprint,
+            'subjectCn'     => $subjectCn,
+            'mode'          => $mode,
+            'daysLeft'      => $daysLeft,
+            'prefix'        => $prefix,
+            'statusUrl'     => url("/{$prefix}/status"),
+            'certUrl'       => url("/{$prefix}/certificate"),
+            'caCertUrl'     => url("/{$prefix}/ca-certificate"),
+            'bundleUrl'     => url("/{$prefix}/client-bundle"),
+            'installerUrl'  => url("/{$prefix}/installer/windows"),
+        ]);
     }
 
     public function certificate(): \Illuminate\Http\Response
@@ -42,6 +93,79 @@ class QzSecurityController extends Controller
                 'Pragma'        => 'no-cache',
             ]
         );
+    }
+
+    /**
+     * GET /qz/ca-certificate — download the trust root clients deploy as QZ
+     * Tray's override.crt (the local Root CA when present, otherwise the
+     * self-signed site certificate). Public certificate material — contains
+     * NO secrets. Gated by qz-tray.routes.serve_ca (disable when the bundle
+     * is distributed out-of-band via GPO/Intune instead).
+     */
+    public function caCertificate(): \Illuminate\Http\Response
+    {
+        if (! config('qz-tray.routes.serve_ca', true)) {
+            abort(404);
+        }
+
+        $caCertPath   = (string) (config('qz-tray.certificate.ca.cert_path') ?: storage_path('qz/ca/qz-root-ca.crt'));
+        $siteCertPath = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
+
+        $path = is_file($caCertPath) ? $caCertPath : $siteCertPath;
+
+        if (! is_file($path)) {
+            abort(404, 'Trust root not found. Run: php artisan qz:generate-ca && php artisan qz:generate-certificate --ca');
+        }
+
+        $filename = is_file($caCertPath) ? 'qz-root-ca.crt' : 'override.crt';
+
+        return response(file_get_contents($path), 200, [
+            'Content-Type'        => 'application/x-x509-ca-cert',
+            'Content-Disposition' => 'attachment; filename="'.$filename.'"',
+            'Cache-Control'       => 'no-store',
+        ]);
+    }
+
+    /**
+     * GET /qz/client-bundle — download the ready-made Windows trust bundle
+     * (override.crt + qz-client-setup.ps1 + setup.bat + provision.json +
+     * README). Built on first request via the same code path as
+     * `php artisan qz:client-bundle`. Requires ext-zip for the download
+     * variant; the CLI command also works without it.
+     */
+    public function clientBundle(): StreamedResponse
+    {
+        if (! config('qz-tray.routes.serve_bundle', true)) {
+            abort(404);
+        }
+
+        if (! extension_loaded('zip')) {
+            abort(503, 'PHP ext-zip is required for the bundle download. Run `php artisan qz:client-bundle --zip` on the server instead.');
+        }
+
+        $bundleDir = storage_path('qz/client-bundle');
+        $zipPath   = $bundleDir.'/qz-client-bundle.zip';
+        $stampPath = $bundleDir.'/.built-stamp';
+
+        // Rebuild when missing or when the signing cert changed since build.
+        $certPath    = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
+        $certStamp   = is_file($certPath) ? md5_file($certPath) : 'missing';
+        $needsBuild  = ! is_file($zipPath) || ! is_file($stampPath) || file_get_contents($stampPath) !== $certStamp;
+
+        if ($needsBuild) {
+            \Artisan::call('qz:client-bundle', ['--force' => true, '--zip' => true]);
+        }
+
+        if (! is_file($zipPath)) {
+            abort(500, 'Client bundle could not be built. Run: php artisan qz:client-bundle --zip');
+        }
+
+        return response()->streamDownload(function () use ($zipPath) {
+            echo file_get_contents($zipPath);
+        }, 'qz-client-bundle.zip', [
+            'Content-Type' => 'application/zip',
+            'Cache-Control' => 'no-store',
+        ]);
     }
 
     public function sign(Request $request): \Illuminate\Http\Response
@@ -113,13 +237,60 @@ class QzSecurityController extends Controller
             'certificate' => $certExists ? 'present' : 'missing',
             'private_key' => $keyExists  ? 'present' : 'missing',
             'certificate_details' => $certDetails,
+            'trust'       => $this->trustSummary($certDetails),
             'endpoints'   => [
                 'certificate' => url("/{$prefix}/certificate"),
                 'sign'        => url("/{$prefix}/sign"),
+                'ca_certificate' => url("/{$prefix}/ca-certificate"),
+                'client_bundle'  => url("/{$prefix}/client-bundle"),
+                'setup_wizard'   => url("/{$prefix}/setup"),
             ],
             'version'   => \Bitdreamit\QzTray\QzTrayServiceProvider::VERSION, // was hardcoded '1.0.0' (AUDIT M1)
             'timestamp' => now()->toIso8601String(),
         ]);
+    }
+
+    /**
+     * Summarise the current zero-prompt trust posture so the setup wizard,
+     * /qz/status consumers and docs never disagree about which path applies.
+     */
+    protected function trustSummary(?array $certDetails): array
+    {
+        $caCertPath   = (string) (config('qz-tray.certificate.ca.cert_path') ?: storage_path('qz/ca/qz-root-ca.crt'));
+        $certPath     = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
+        $hasCa        = is_file($caCertPath);
+        $leafChainsCa = false;
+
+        if ($hasCa && is_file($certPath)) {
+            try {
+                $leafChainsCa = CertKit::leafChainsTo((string) file_get_contents($certPath), (string) file_get_contents($caCertPath));
+            } catch (\Throwable $e) {
+                $leafChainsCa = false;
+            }
+        }
+
+        $selfSigned = $certDetails['self_signed'] ?? null;
+
+        // 'public-ca'  → real CA cert (Let's Encrypt/AutoSSL/Cloudflare edge)
+        //                QZ Tray trusts it silently, zero client changes.
+        // 'own-ca'     → leaf chains to our Root CA → deploy override.crt once.
+        // 'self-signed'→ Always Allow once per machine (or deploy the leaf
+        //                itself as override.crt).
+        $mode = 'self-signed';
+        if ($selfSigned === false && ! $leafChainsCa) {
+            $mode = 'public-ca';
+        } elseif ($hasCa && $leafChainsCa) {
+            $mode = 'own-ca';
+        }
+
+        return [
+            'mode'                    => $mode,
+            'root_ca_present'         => $hasCa,
+            'leaf_chains_to_root_ca'  => $leafChainsCa,
+            'ca_certificate_url'      => url('/'.config('qz-tray.routes.prefix', 'qz').'/ca-certificate'),
+            'client_bundle_url'       => url('/'.config('qz-tray.routes.prefix', 'qz').'/client-bundle'),
+            'guide'                   => 'docs/zero-prompt.md',
+        ];
     }
 
     public function health(): \Illuminate\Http\JsonResponse
@@ -905,10 +1076,13 @@ class QzSecurityController extends Controller
             'success'     => true,
             'certificate' => ($certPath && file_exists($certPath)) ? 'exists' : 'missing',
             'private_key' => ($keyPath  && file_exists($keyPath))  ? 'exists' : 'missing',
+            'trust'       => $this->trustSummary(null),
             'endpoints'   => [
                 'certificate' => url("/{$prefix}/certificate"),
                 'sign'        => url("/{$prefix}/sign"),
                 'status'      => url("/{$prefix}/status"),
+                'ca_certificate' => url("/{$prefix}/ca-certificate"),
+                'client_bundle'  => url("/{$prefix}/client-bundle"),
             ],
         ]);
     }
