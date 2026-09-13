@@ -3,6 +3,116 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.5.0] — 2026-09-14
+
+### Added — "Universal Print API + Smart Actions" client layer (resources/js/smart-print.js)
+
+- **Class binding — any button/link with `class="smart-print"` prints**:
+  zero JS wiring — `<button class="smart-print" data-qz-url="/receipt/5.pdf">`,
+  `<a class="smart-print" href="/receipt/5.pdf">`, `data-qz-urls="a.pdf|b.pdf"`
+  (batch), `data-qz-html="<b>Hi</b>"`, `data-qz-element="#worklist-table"`,
+  `data-qz-data="JVBERi0..."` (base64 / data: URI). Routing precedence:
+  `data-qz-action` > element's own `onclick` (left entirely to that function —
+  never double-prints, navigation suppressed) > urls > url > html > element >
+  data > `<a href>` > silent console hint. Per-element overrides:
+  `data-qz-printer`, `data-qz-copies`, `data-qz-profile`, `data-qz-type`,
+  `data-qz-fetch`, `data-qz-filename`.
+- **onclick function routing**: the built-ins are guarded `window` globals,
+  so plain `onclick="printUrl('/receipt/5.pdf')"` or
+  `onclick="printElement('#worklist', { copies: 2 })"` works with no other
+  setup — class optional.
+- **Generic names are BUILT-IN — zero setup**: `printUrl`, `printUrls`,
+  `printPdf`, `printPdfs`, `printImage`, `printImages`, `printHtml`,
+  `printElement`, `printElements`, `printPage`, `printAnyUrl`, `printAnyUrls`
+  are registered automatically at load time — as `SmartPrint` methods, as
+  guarded `window` globals, and as `data-qz-action` targets. No `define()`
+  needed anymore; `SmartPrint.define({...})` stays for presets
+  (printer/profile) and custom business names.
+- **Browser-fetch hydration engine (the big fix)**: same-origin URLs are
+  downloaded BY THE PAGE first (`fetch`, `credentials: 'same-origin'`), the
+  response `Content-Type` picks the print path, and the bytes go to QZ Tray
+  as base64. QZ itself has no session — this makes **auth-protected Laravel
+  routes work for the first time**, including mPDF `->stream()` and
+  `->download()` (Content-Disposition is ignored). Modes:
+  `window.QZ_CONFIG.fetchMode = 'auto' (default, same-origin) | 'always' |
+  'never'`; per call `printUrl(url, { fetch: true|false })`.
+- **Misdirected-response guard**: a `.pdf`/image URL that answers
+  `text/html` (login redirect, 404 page) or JSON is detected and NOT
+  printed — the promise resolves `{ success: false, reason:
+  'unexpected-response', contentType, status }` instead of feeding garbage
+  to QZ or printing a login page. Unlabeled `application/octet-stream`
+  responses are sniffed by magic bytes (`%PDF-`, PNG, JPEG, GIF).
+- **Native image printing**: new `image` job type → QZ payload
+  `{type:'image', format:'base64'|url}`; `printImage(url|dataURI|base64|
+  element)`; browser-fallback iframe prints via an `<img onload=print>`
+  document; `sniffType` now recognizes image extensions and raw
+  base64 payloads (`iVBOR`/`/9j/`/`R0lGOD` prefixes).
+- **`printPage()`** — snapshot the whole page (stylesheets cloned) and print
+  via QZ html payload, or `{ mode: 'browser' }` for plain `window.print()`.
+- **Batch buttons**: `data-qz-urls="u1|u2|u3"` (pipe-separated), plus
+  `data-qz-type` and `data-qz-fetch` attribute overrides.
+- **Fallback observability**: `window.QZ_CONFIG.onFallback(job)` hook and
+  `QZ_CONFIG.notify = true` toast when a job degrades to the browser —
+  silent by default, business flows never interrupted.
+- **Robustness fixes**: raw HTML strings passed to `printHtml('<h1>…')` are
+  recognized (not treated as URLs); base64-looking inputs are detected by
+  magic prefix instead of falling through to relative-URL guesses;
+  hydrated base64 bytes now survive a mid-print QZ failure into the
+  fallback engines (`jobSpecForFallback` carries `base64`/`imageMime`);
+  ArrayBuffer→base64 conversion is chunked (no stack overflow on large
+  PDFs).
+
+### Compatibility
+- Legacy named actions (`printLabReceipt`/`printLabReceipts` and any custom
+  `define()` names) keep working unchanged — they are thin aliases /
+  overrides of the built-ins, and user-defined templates take precedence.
+- `SmartPrint.printHTML`/`printPdf`/`printElement` keep their signatures;
+  they are rerouted through the action runner so every call gets hydration
+  + overrides + fallback parity.
+
+### Added — "Smart Actions" client layer (same release)
+- **Named actions, one call anywhere**: `SmartPrint.define({ printLabReceipt:
+  { type: 'pdf', profile: 'a4' } })` registers the action AND auto-creates a
+  guarded `window.printLabReceipt(...)` global (never overwrites an existing
+  app function). Works via `SmartPrint.run(name, ...)`, `SmartPrint.<name>(...)`
+  (Proxy), the window global, or plain buttons
+  (`data-qz-action="printLabReceipt" data-qz-url="..."` / `data-qz-target="#el"`).
+- **Any-input resolvers**: every action accepts a URL, css selector (#id /
+  .class / any), HTMLElement, jQuery object, base64 string, `data:` URI,
+  `{url|html|pdf|base64|selector|element|zpl|escpos|raw}`, a lazy `() => input`
+  (resolved at call time), or an array of any of these (sequential batch).
+  Element inputs snapshot the node plus the page stylesheets so printouts
+  match the screen (`styles: false` to skip).
+- **Never dead-ends — automatic browser fallback**: when QZ Tray is not
+  installed / not connected / fails mid-print / the user cancels printer
+  selection, the same call now degrades to the hidden-iframe browser print
+  (new default `'auto'`) instead of parking the job and rejecting. Modes:
+  `'auto' | 'iframe' | 'window' | 'newtab' | 'download' | 'queue' | 'none' |
+  function`. Configure with `window.QZ_CONFIG.fallbackMode` or per action /
+  per call; `'queue'` preserves the pre-1.5 offline-retry behavior. Iframe
+  fallbacks serialize through one chain (browsers cannot stack print
+  dialogs), with `onafterprint` + Safari-safe cleanup timers.
+- **PDF base64 printing**: qz.print payload now accepts base64 bytes
+  directly (`{type:'pdf', data}`) — no public URL round-trip needed;
+  fallback engines convert base64 to blob URLs for the iframe/dialog paths.
+- **Printer aliases**: `SmartPrint.aliasPrinter('receipt', 'XP-80C')` — views
+  reference friendly names, real OS names live in one line; aliases resolve
+  at PRINT time (re-mapping mid-batch works).
+- **Health API**: `SmartPrint.status()` (library/connected/printers/queues/
+  fallbackMode/actions) and `SmartPrint.whenReady(ms)` — a promise that
+  settles with `{ok, reason}` as soon as tray availability is known.
+- **Result contract**: promises now resolve `{ jobId, success, fallback?,
+  cancelled?, reason? }` whenever a fallback produced output — no more
+  "Uncaught (in promise)" noise on machines without the tray. Rejection is
+  reserved for queue-mode and nothing-printable cases.
+- Convenience globals (collision-guarded): `smartPrintHTML`, `smartPrintPdf`,
+  `printElement`, `smartPrintRun`, `smartPrintDefine`; new methods
+  `printHTML / printPdf / printElement / define / run / has / actions /
+  aliasPrinter / whenReady / status`; `version` field. Existing API
+  (`print / printZPL / printESC / data-qz-* attributes`) unchanged.
+- New example: `resources/js/sample/smart-actions.lab.example.js` (lab /
+  clinic receipt + worklist + label starter, copy-paste ready).
+
 ## [1.4.2] — 2026-09-13
 
 ### Fixed

@@ -2,10 +2,64 @@
  * SmartPrint — Laravel QZ Tray client library
  * Connects to QZ Tray for silent, dialog-free printing.
  *
- * Usage:
- *   <button data-qz-print="/invoice/1.pdf" data-qz-printer="Receipt Printer">Print</button>
- *   <div data-qz-auto-print="/receipt/1.pdf" data-qz-delay="1000"></div>
- *   smartPrint('/doc.pdf', { printer: 'HP', copies: 2 });
+ * Usage — four zero-config ways to print, pick whichever feels easiest:
+ *
+ *   1. class binding  — ANY button/link with class "smart-print" prints:
+ *       <button class="smart-print" data-qz-url="/receipt/5.pdf">Print</button>
+ *       <a class="smart-print" href="/receipt/5.pdf">Print receipt</a>
+ *       <button class="smart-print" data-qz-urls="/a.pdf|/b.pdf|/c.pdf">Batch</button>
+ *       <button class="smart-print" data-qz-element="#worklist-table">Worklist</button>
+ *       <button class="smart-print" data-qz-html="&lt;h1&gt;Hello&lt;/h1&gt;">Hello</button>
+ *
+ *   2. onclick routing — the built-in functions are window globals, so a
+ *      plain onclick works too (class or no class):
+ *       <button onclick="printUrl('/receipt/5.pdf')">Print</button>
+ *       <button onclick="printElement('#worklist-table', { copies: 2 })">…</button>
+ *       <a href="#" onclick="printUrls(['/a.pdf','/b.pdf']); return false;">…</a>
+ *      (An element that has BOTH class="smart-print" and its own onclick is
+ *      left entirely to the onclick — never double-printed.)
+ *
+ *   3. named actions — <button data-qz-action="printLabReceipt" data-qz-url="/receipt/5.pdf">
+ *   4. JS calls —     printUrl('/receipt/5.pdf');  smartPrint('/doc.pdf', {copies: 2});
+ *
+ *   <div data-qz-auto-print="/receipt/1.pdf" data-qz-delay="1000"></div>  auto on load
+ *
+ * v1.5 — Universal Print API: the generic names are BUILT-IN. No define()
+ * needed — available as SmartPrint methods AND guarded window globals:
+ *
+ *   printUrl(url)                        any URL — PDF, image or HTML, the
+ *                                       type is detected from Content-Type
+ *   printUrls([url1, url2, url3])        sequential batch
+ *   printPdf(x) / printPdfs([..])        URL | data: URI | raw base64
+ *   printImage(x) / printImages([..])    image URL / data: URI / base64
+ *   printHtml(html)                      HTML string | element | selector
+ *   printElement('#id' | '.class')       any DOM element (styles cloned)
+ *   printPage()                          the current page
+ *   printUrl(url, { copies: 3 })         per-call overrides
+ *
+ * Works out of the box on Laravel routes that stream documents, including
+ * mPDF ->stream() / ->download() behind auth middleware — v1.5 downloads
+ * same-origin URLs through the PAGE first (session cookies included) and
+ * hands QZ Tray the bytes, so the tray never needs its own session.
+ *
+ * Legacy names keep working: printLabReceipt / printLabReceipts are just
+ * aliases of printUrl / printUrls (custom define() templates still win).
+ *
+ * Input flexibility — every function accepts:
+ *   URL string | css selector (#id / .class / any) | HTMLElement | jQuery obj
+ *   base64 / data: URI | {url|html|pdf|base64|selector|element|zpl|escpos|raw}
+ *   () => any of the above (lazy)  |  array of any of the above (batch)
+ *
+ * Fallback engine — if QZ Tray is not installed / not connected / fails
+ * mid-print, the SAME call degrades automatically (default: hidden-iframe
+ * browser print; also 'window' | 'newtab' | 'download' | 'queue' | none |
+ * custom function). Configure globally: window.QZ_CONFIG.fallbackMode.
+ * Nothing throws unhandled; every promise resolves with a clear result.
+ *
+ * Extras: SmartPrint.aliasPrinter('receipt', 'XP-80C'), SmartPrint.status(),
+ * SmartPrint.whenReady(3000), printer-alias resolution at print time,
+ * PDF base64 printing without a URL, stylesheets cloned into element
+ * printouts, and data-qz-action buttons.
  */
 window.SmartPrint = (() => {
     const STORAGE_PREFIX = 'smart_printer:';
@@ -457,7 +511,7 @@ window.SmartPrint = (() => {
                 if (connected) {
                     await printQZ(job);
                 } else {
-                    offlineBuffer(job);
+                    handleNoConnection(job);
                 }
             } catch (err) {
                 console.error('[SmartPrint] Job error:', err);
@@ -467,6 +521,60 @@ window.SmartPrint = (() => {
 
         processingQueue = false;
         updateQueueUI();
+    }
+
+    // v1.5 — optional user-visible notice + hook when a job degrades to the
+    // browser. Silent by default (QZ_CONFIG.notify = true enables the toast;
+    // QZ_CONFIG.onFallback = fn receives the job) so business flows are
+    // never interrupted by UI noise.
+    function notifyFallback(job) {
+        const cfg = window.QZ_CONFIG || {};
+        if (typeof cfg.onFallback === 'function') {
+            try { cfg.onFallback(job); } catch (e) { console.error('[SmartPrint] onFallback error:', e); }
+        }
+        if (cfg.notify) toastNotice('QZ Tray unavailable — printed via browser');
+    }
+
+    function toastNotice(msg) {
+        try {
+            let t = document.getElementById('sp-toast');
+            if (!t) {
+                t = document.createElement('div');
+                t.id = 'sp-toast';
+                t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:99999;'
+                    + 'background:#333;color:#fff;padding:10px 14px;border-radius:6px;'
+                    + 'font:13px system-ui,sans-serif;opacity:0;transition:opacity .3s;'
+                    + 'pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.25)';
+                document.body.appendChild(t);
+            }
+            t.textContent = msg;   // textContent — never HTML
+            t.style.opacity = '1';
+            clearTimeout(t._spTimer);
+            t._spTimer = setTimeout(() => { t.style.opacity = '0'; }, 3500);
+        } catch (e) {}
+    }
+
+    // v1.5: QZ Tray not installed / not running / refused the connection.
+    // The pre-1.5 behavior parked the job in the offline retry queue; with
+    // fallbackMode 'auto' (the default) printable jobs degrade to the
+    // browser immediately so a machine without the tray still prints. The
+    // old behavior remains available via QZ_CONFIG.fallbackMode = 'queue'.
+    function handleNoConnection(job) {
+        const mode = resolveFallbackMode(job);
+        const printable = job.type === 'pdf' || job.type === 'html';
+
+        if (!printable || mode === 'queue' || mode === 'offline' || mode === 'none' || mode === false) {
+            return offlineBuffer(job);
+        }
+
+        const printed = fallback(job);
+        if (printed) {
+            notifyFallback(job);
+            emit('job-failed', { job, fallback: true, reason: 'qz-unavailable' });
+            job._resolve && job._resolve({ jobId: job.id, success: false, fallback: true, reason: 'qz-unavailable' });
+        } else {
+            offlineBuffer(job);
+        }
     }
 
     function offlineBuffer(job) {
@@ -552,7 +660,10 @@ window.SmartPrint = (() => {
     // Core print function
     // ============================
     async function printQZ(job) {
-        const printer = job.printer || state.currentPrinter;
+        // v1.5: printer names may be aliases registered via
+        // SmartPrint.aliasPrinter('receipt', 'XP-80C') — resolve at print
+        // time so an alias defined after the job was queued still wins.
+        const printer = resolveAlias(job.printer) || state.currentPrinter;
 
         if (!printer) {
             // Promise stays pending — resolved/rejected once the user
@@ -584,15 +695,19 @@ window.SmartPrint = (() => {
         let payload;
         switch (job.type) {
             case 'pdf':
-                if (!job.url) {
-                    const err = new Error('Missing PDF url');
-                    console.error('[SmartPrint] PDF print requires a url.');
+                if (!job.url && !job.data) {
+                    const err = new Error('Missing PDF url or base64 data');
+                    console.error('[SmartPrint] PDF print requires a url or base64 data.');
                     emit('job-failed', { job, error: err });
                     safeCallback(job.onError, err, job);
                     job._reject && job._reject(err);
                     return;
                 }
-                payload = [{ type: 'pdf', data: job.url }];
+                // v1.5: QZ Tray accepts BOTH a URL and base64-encoded bytes in
+                // the pdf payload — direct base64 printing (fetched blobs,
+                // canvas exports, already-downloaded documents) no longer
+                // needs a round-trip to a public URL.
+                payload = [{ type: 'pdf', data: job.url || job.data }];
                 break;
             case 'html':
                 if (!job.data && !job.url) {
@@ -604,6 +719,21 @@ window.SmartPrint = (() => {
                     return;
                 }
                 payload = [{ type: 'html', data: job.data || job.url }];
+                break;
+            case 'image':
+                // v1.5: native QZ image payload — base64 (hydrated bytes) or
+                // a direct URL (public URLs only; QZ fetches those itself).
+                if (!job.data && !job.url) {
+                    const err = new Error('Missing image data or url');
+                    console.error('[SmartPrint] Image print requires data or url.');
+                    emit('job-failed', { job, error: err });
+                    safeCallback(job.onError, err, job);
+                    job._reject && job._reject(err);
+                    return;
+                }
+                payload = job.data
+                    ? [{ type: 'image', format: 'base64', data: job.data }]
+                    : [{ type: 'image', data: job.url }];
                 break;
             case 'zpl':
             case 'raw':
@@ -641,36 +771,260 @@ window.SmartPrint = (() => {
             emit('job-failed', { job, error: err });
             safeCallback(job.onError, err, job);
             logPrintJob(job, printer, 'failed', err && err.message);
-            fallback(job);
-            job._reject && job._reject(err);
+            // v1.5 contract: when the fallback engine produced output, the
+            // promise RESOLVES with { success: false, fallback: true } instead
+            // of rejecting — callers no longer need try/catch to avoid
+            // "Uncaught (in promise)" noise when the tray fails mid-print.
+            const printed = fallback(job);
+            if (printed) {
+                notifyFallback(job);
+                job._resolve && job._resolve({ jobId: job.id, success: false, fallback: true, error: err });
+            } else {
+                job._reject && job._reject(err);
+            }
         }
     }
 
     // ============================
-    // Browser fallback
+    // Browser fallback engines (v1.5)
     // ============================
+    // A job must NEVER dead-end because QZ Tray is missing, disconnected or
+    // failed mid-print. fallback(job) dispatches on the job's fallback mode:
+    //
+    //   'auto'      default — printable specs go to the hidden-iframe engine,
+    //               raw/zpl specs return false (nothing a browser can print;
+    //               the offline retry queue takes over)
+    //   'iframe'    hidden 0x0 iframe + contentWindow.print() — no popup
+    //               blocker friction, dialogs come from the browser itself
+    //   'window'    window.open(url) + print() (pre-1.5 behavior)
+    //   'newtab'    plain new tab, no print() call
+    //   'download'  <a download> click (blob URL generated for base64 PDFs)
+    //   'queue'/'offline'  park the job for the retry queue (pre-1.5 default)
+    //   'none'/false      do nothing, caller rejects
+    //   function    custom (job, reason) => void — full control
+    //
+    // Mode source order: job.fallback → window.QZ_CONFIG.fallbackMode → 'auto'.
+    // Returns true when something printable was actually dispatched.
+    function resolveFallbackMode(job) {
+        if (job && job.fallback !== undefined && job.fallback !== null) return job.fallback;
+        const cfg = window.QZ_CONFIG || {};
+        return cfg.fallbackMode !== undefined ? cfg.fallbackMode : 'auto';
+    }
+
+    // Build a printable spec from a legacy job shape (type/url/data/element)
+    // so the fallback engines share one format with the v1.5 action specs.
+    function jobSpecForFallback(job) {
+        const spec = { type: job.type, url: job.url, data: job.data, element: job.element, filename: job.filename };
+        // v1.5: carry hydrated base64 + image mime through to the fallback
+        // engines so a mid-print QZ failure still prints the fetched bytes.
+        if (job.base64) {
+            spec.base64 = job.base64;
+        } else if ((job.type === 'pdf' || job.type === 'image') && typeof job.data === 'string'
+                   && job.data.length > 40 && /^[A-Za-z0-9+/]+={0,2}$/.test(job.data)) {
+            spec.base64 = job.data;   // legacy jobs kept raw base64 in `data`
+            spec.data = undefined;
+        }
+        spec.imageMime = job.imageMime;
+        if (spec.type === 'html' && spec.element && !spec.data) {
+            spec.data = captureElement(spec.element, job);
+        }
+        return spec;
+    }
+
+    function printableSpecs(job) {
+        return (job._specs && job._specs.length ? job._specs : [jobSpecForFallback(job)])
+            .filter(s => s && (s.type === 'pdf' || s.type === 'html' || s.type === 'image')
+                && (s.url || s.data || s.base64 || s.element));
+    }
+
     function fallback(job) {
-        emit('fallback-print', { job });
+        let mode = resolveFallbackMode(job);
+        emit('fallback-print', { job, mode });
 
-        if (job.type === 'pdf' && job.url) {
-            const w = window.open(job.url, '_blank');
-            if (w) {
-                w.onload = () => { try { w.print(); } catch (_) {} };
+        if (typeof mode === 'function') {
+            try { mode(job); } catch (e) { console.error('[SmartPrint] fallback callback error', e); }
+            return true;
+        }
+
+        const specs = printableSpecs(job);
+
+        if (mode === 'auto' || mode === undefined || mode === null) {
+            // Anything a browser can print goes to the iframe engine; raw
+            // printer languages return false so the offline queue retains it.
+            mode = specs.length ? 'iframe' : 'none';
+        }
+
+        switch (mode) {
+            case 'iframe':
+                // Browsers cannot show two print dialogs at once — serialize
+                // with a small gap so a batch of receipts prints one by one.
+                if (!specs.length) return false;
+                specs.reduce((p, s) => p.then(() => new Promise(res =>
+                    setTimeout(() => fallbackIframe(s, job, res), 200))), Promise.resolve());
+                return true;
+            case 'window':
+                return specs.map(windowFallback).some(Boolean);
+            case 'newtab':
+                specs.forEach(s => { if (s.url || s.base64) window.open(s.base64 ? (base64ToBlobUrl(s.base64, s.imageMime) || s.url) : s.url, '_blank'); });
+                return specs.length > 0;
+            case 'download':
+                return specs.map(downloadSpec).some(Boolean);
+            default:
+                // 'queue' / 'offline' / 'none' / false / unknown — caller
+                // (offlineBuffer or the action runner) decides what's next.
+                return false;
+        }
+    }
+
+    // Serialize ALL iframe fallbacks through one chain — two simultaneous
+    // window.print() calls in hidden frames make Chrome print the wrong
+    // document or drop the second dialog entirely.
+    let _fallbackChain = Promise.resolve();
+
+    function queueFallbackTask(fn) {
+        const run = () => new Promise(resolve => {
+            try { fn(resolve); } catch (e) { console.warn('[SmartPrint] fallback failed:', e); resolve(); }
+        });
+        _fallbackChain = _fallbackChain.then(run, run).catch(() => {});
+        return _fallbackChain;
+    }
+
+    // Hidden-iframe print — the same technique lab apps use for direct
+    // Windows printing, minus the popup blocker and the blank-tab debris.
+    function printIframe(src, done) {
+        const old = document.getElementById('sp-fallback-frame');
+        if (old) old.remove();
+
+        const iframe = document.createElement('iframe');
+        iframe.id   = 'sp-fallback-frame';
+        iframe.style.cssText = 'width:0;height:0;border:0;position:absolute;left:-9999px;';
+        iframe.src  = src;
+
+        iframe.onload = () => {
+            try {
+                const win = iframe.contentWindow;
+                if (!win) { iframe.remove(); done && done(); return; }
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    setTimeout(() => { if (iframe.parentNode) iframe.remove(); done && done(); }, 400);
+                };
+                win.onafterprint = finish;          // Chrome/Edge/Firefox
+                win.focus();
+                win.print();
+                // Safari never fires onafterprint inside iframes — and any
+                // browser can stall — so fall back to a generous cleanup
+                // timer instead of leaking the frame forever.
+                setTimeout(finish, 60000);
+            } catch (e) {
+                console.warn('[SmartPrint] iframe print failed:', e);
+                iframe.remove();
+                done && done();
             }
+        };
+
+        document.body.appendChild(iframe);
+    }
+
+    // Shared hidden-iframe document printer (html payloads + image wrappers).
+    function printHtmlInIframe(html, done) {
+        const old = document.getElementById('sp-fallback-frame');
+        if (old) old.remove();
+
+        const iframe = document.createElement('iframe');
+        iframe.id   = 'sp-fallback-frame';
+        iframe.style.cssText = 'width:0;height:0;border:0;position:absolute;left:-9999px;';
+        document.body.appendChild(iframe);
+
+        try {
+            const doc = iframe.contentDocument;
+            doc.open(); doc.write(html); doc.close();
+            const win = iframe.contentWindow;
+            let finished = false;
+            const finish = () => {
+                if (finished) return;
+                finished = true;
+                setTimeout(() => { if (iframe.parentNode) iframe.remove(); done(); }, 400);
+            };
+            win.onafterprint = finish;
+            win.focus();
+            win.print();
+            setTimeout(finish, 60000);
+        } catch (e) {
+            console.warn('[SmartPrint] iframe HTML print failed:', e);
+            iframe.remove();
+            done();
+        }
+    }
+
+    function fallbackIframe(spec, job, done) {
+        done = done || (() => {});
+
+        if (spec.type === 'pdf') {
+            // Base64 PDFs: convert to a blob URL (sandbox-friendly, no
+            // server round-trip), then print like any other PDF URL.
+            if (!spec.url && spec.base64) {
+                const blobUrl = base64ToBlobUrl(spec.base64);
+                if (!blobUrl) { done(); return; }
+                spec.url = blobUrl;
+            }
+            if (!spec.url) { done(); return; }
+            printIframe(spec.url, done);
             return;
         }
 
-        if (job.type === 'html') {
-            const w = window.open('', '_blank');
-            if (w) {
-                w.document.write(job.data || '');
-                w.document.close();
-                w.onload = () => { try { w.print(); } catch (_) {} };
-            }
+        // v1.5: image specs (hydrated base64 or URL) print through the same
+        // hidden iframe as an <img> document — the inline onload defers
+        // print() until the image is fully decoded, avoiding blank prints.
+        if (spec.type === 'image') {
+            const src = spec.base64
+                ? 'data:' + (spec.imageMime || 'image/png') + ';base64,' + spec.base64
+                : spec.url;
+            if (!src) { done(); return; }
+            printHtmlInIframe(
+                '<!DOCTYPE html><html><head><title>Print</title>'
+                + '<style>@page{margin:0}html,body{margin:0;padding:0}img{max-width:100%}</style></head>'
+                + '<body><img src="' + escapeHtml(src) + '" onload="window.focus();window.print()"></body></html>',
+                done
+            );
             return;
         }
 
-        console.warn('[SmartPrint] Silent printing unavailable. Install QZ Tray: https://qz.io/download');
+        if (spec.type === 'html') {
+            const html = spec.data || (spec.element ? captureElement(spec.element, job) : '');
+            if (!html) { done(); return; }
+            printHtmlInIframe(html, done);
+            return;
+        }
+
+        done(); // raw/zpl/escpos: nothing a browser can print
+    }
+
+    function windowFallback(spec) {
+        let url = spec.url;
+        if (!url && spec.base64) url = base64ToBlobUrl(spec.base64, spec.imageMime);
+        const w = url ? window.open(url, '_blank') : window.open('', '_blank');
+        if (!w) return false; // popup blocked — caller can try other modes
+        if (spec.type === 'html' && spec.data) {
+            w.document.write(spec.data);
+            w.document.close();
+        }
+        try { w.onload = () => { try { w.print(); } catch (_) {} }; } catch (e) {}
+        return true;
+    }
+
+    function downloadSpec(spec) {
+        let href = spec.url;
+        if (!href && spec.base64) href = base64ToBlobUrl(spec.base64, spec.imageMime);
+        if (!href) return false;
+        const a = document.createElement('a');
+        a.href = href;
+        if (spec.filename) a.download = spec.filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        return true;
     }
 
     // ============================
@@ -731,7 +1085,16 @@ window.SmartPrint = (() => {
         const abandon = () => {
             modal.remove();
             if (jobToQueue && jobToQueue._reject) {
-                jobToQueue._reject(new Error('Print cancelled: no printer selected'));
+                // v1.5: cancelling printer selection must not dead-end the
+                // caller either — 'auto' fallback prints via the browser;
+                // only modes with no printable output still reject.
+                const printed = fallback(jobToQueue);
+                if (printed) {
+                    notifyFallback(jobToQueue);
+                    jobToQueue._resolve({ jobId: jobToQueue.id, success: false, fallback: true, cancelled: true });
+                } else {
+                    jobToQueue._reject(new Error('Print cancelled: no printer selected'));
+                }
             }
         };
 
@@ -803,6 +1166,120 @@ window.SmartPrint = (() => {
         if (! _clickBound) {
             _clickBound = true;
             document.addEventListener('click', e => {
+                // v1.5: named-action buttons —
+                //   <button data-qz-action="printLabReceipt"
+                //           data-qz-url="/receipt/5.pdf"
+                //           data-qz-target="#receipt-box"
+                //           data-qz-printer="receipt" data-qz-copies="2">Print</button>
+                // resolves to the action registered via SmartPrint.define().
+                // Input precedence: data-qz-target (selector / element) >
+                // data-qz-url > data-qz-data > href (for <a> tags) > none
+                // (action template may carry its own default input).
+                const actionEl = e.target.closest('[data-qz-action]');
+                if (actionEl) {
+                    e.preventDefault();
+                    const action  = actionEl.dataset.qzAction;
+                    const target  = actionEl.dataset.qzTarget;
+                    // v1.5: data-qz-urls="u1|u2|u3" — batch buttons without JS.
+                    const multi = (actionEl.dataset.qzUrls || '')
+                        .split('|').map(s => s.trim()).filter(Boolean);
+                    const input   = target !== undefined && target !== null
+                        ? target
+                        : (multi.length ? multi
+                            : (actionEl.dataset.qzUrl || actionEl.dataset.qzData
+                                || (actionEl.tagName === 'A' && actionEl.getAttribute('href')
+                                    ? actionEl.getAttribute('href') : undefined)));
+                    const overrides = {
+                        printer: actionEl.dataset.qzPrinter || undefined,
+                        copies:  parseInt(actionEl.dataset.qzCopies || '0', 10) || undefined,
+                        profile: actionEl.dataset.qzProfile || undefined,
+                        type:    actionEl.dataset.qzType    || undefined,
+                        fetch:   actionEl.dataset.qzFetch === 'true' ? true
+                                 : (actionEl.dataset.qzFetch === 'false' ? false : undefined),
+                    };
+                    try {
+                        run(action, input, overrides).catch(err =>
+                            console.warn('[SmartPrint] action "' + action + '" failed:', err));
+                    } catch (err) {
+                        // unknown action name — surface loudly in the console
+                        console.error(err);
+                    }
+                    return;
+                }
+
+                // v1.5: class binding — ANY button/link with class "smart-print"
+                // prints, no JS wiring needed:
+                //   <button class="smart-print" data-qz-url="/receipt/5.pdf">Print</button>
+                //   <a class="smart-print" href="/receipt/5.pdf">Print receipt</a>
+                //   <button class="smart-print" data-qz-urls="/a.pdf|/b.pdf">Batch</button>
+                //   <button class="smart-print" data-qz-element="#worklist">Worklist</button>
+                //   <button class="smart-print" data-qz-html="<b>Hi</b>">Hi</button>
+                //   <button class="smart-print" data-qz-data="JVBERi0xLj...">Bytes</button>
+                // Routing precedence:
+                //   1. data-qz-action (handled above — named action wins).
+                //   2. the element's OWN onclick — left ENTIRELY to the app
+                //      ("function route"): printUrl/printHtml/printElement/…
+                //      are window globals, so onclick="printUrl('/x.pdf')"
+                //      just works. We still preventDefault so an <a> doesn't
+                //      navigate after printing — and we never auto-print on
+                //      top of it, so nothing double-prints.
+                //   3. data-qz-urls → printUrls | data-qz-url → printUrl
+                //   4. data-qz-html → printHtml | data-qz-element → printElement
+                //   5. data-qz-data / data-qz-base64 → printUrl (auto-detects
+                //      base64 / data: URI payloads)
+                //   6. plain <a href> → printUrl(href)
+                //   7. nothing to print → silent console hint, page unharmed.
+                const smartEl = e.target.closest('.smart-print');
+                if (smartEl) {
+                    if (typeof smartEl.getAttribute('onclick') === 'string') {
+                        e.preventDefault(); // the onclick function does the printing
+                        return;
+                    }
+
+                    e.preventDefault(); // buttons in <form> must not submit
+
+                    const multi = (smartEl.dataset.qzUrls || '')
+                        .split('|').map(s => s.trim()).filter(Boolean);
+                    const overrides = {
+                        printer:  smartEl.dataset.qzPrinter || undefined,
+                        copies:   parseInt(smartEl.dataset.qzCopies || '0', 10) || undefined,
+                        profile:  smartEl.dataset.qzProfile || undefined,
+                        type:     smartEl.dataset.qzType    || undefined,
+                        fetch:    smartEl.dataset.qzFetch === 'true' ? true
+                                  : (smartEl.dataset.qzFetch === 'false' ? false : undefined),
+                        filename: smartEl.dataset.qzFilename || undefined,
+                    };
+
+                    const route = (action, input) => {
+                        try {
+                            run(action, input, overrides).catch(err =>
+                                console.warn('[SmartPrint] .smart-print "' + action + '" failed:', err));
+                        } catch (err) {
+                            console.error(err);
+                        }
+                    };
+
+                    if (multi.length) return route('printUrls', multi);
+                    if (smartEl.dataset.qzUrl || smartEl.dataset.url)
+                        return route('printUrl', smartEl.dataset.qzUrl || smartEl.dataset.url);
+                    if (smartEl.dataset.qzHtml)
+                        return route('printHtml', smartEl.dataset.qzHtml);
+                    if (smartEl.dataset.qzElement || smartEl.dataset.qzTarget)
+                        return route('printElement', smartEl.dataset.qzElement || smartEl.dataset.qzTarget);
+                    if (smartEl.dataset.qzData || smartEl.dataset.qzBase64)
+                        return route('printUrl', smartEl.dataset.qzData || smartEl.dataset.qzBase64);
+
+                    const href = smartEl.tagName === 'A' ? smartEl.getAttribute('href') : null;
+                    if (href && href !== '#' && !/^(javascript|mailto|tel):/i.test(href))
+                        return route('printUrl', href);
+
+                    console.info('[SmartPrint] .smart-print element has nothing to print — add '
+                        + 'data-qz-url="/doc.pdf", data-qz-html, data-qz-element, '
+                        + 'data-qz-urls="a.pdf|b.pdf", data-qz-data, or onclick="printUrl(...)".');
+
+                    return;
+                }
+
                 const el = e.target.closest('[data-qz-print], [data-smart-print]');
                 if (!el) return;
 
@@ -951,9 +1428,498 @@ window.SmartPrint = (() => {
     }
 
     // ============================
-    // Public API
+    // Smart Actions (v1.5) — content resolvers & named actions
     // ============================
-    return {
+    // One call, any input, no dead ends:
+    //
+    //   SmartPrint.define({
+    //     printLabReceipt:  { type: 'pdf', profile: 'a4' },
+    //     printLabReceipts: { type: 'pdf', profile: 'a4' },
+    //     printWorkList:    { type: 'pdf', profile: 'small', printer: 'receipt' },
+    //   });
+    //   printLabReceipt('/receipt/5.pdf');              // window global, auto-created
+    //   printLabReceipts([url1, url2, url3]);           // sequential batch
+    //   printWorkList('#worklist-table');               // any element by selector
+    //   SmartPrint.run('printLabReceipt', base64OrUrl); // programmatic
+    //
+    // If QZ Tray is installed+connected → silent print. If not → the exact
+    // same call degrades to the hidden-iframe browser print (or download /
+    // new tab / custom function) — the page never crashes and the caller
+    // never needs an if(qz) branch.
+
+    function querySelectorSafe(selector) {
+        try { return document.querySelector(selector); } catch (e) { return null; }
+    }
+
+    // data:/blob: base64 payload -> object URL (for iframe/window/download
+    // fallbacks). Returns null when the payload cannot be decoded.
+    function base64ToBlobUrl(b64, mime) {
+        try {
+            const clean = String(b64).replace(/^data:[^,]*;base64,/, '').replace(/\s+/g, '');
+            const bin = atob(clean);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return URL.createObjectURL(new Blob([bytes], { type: mime || 'application/pdf' }));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // ArrayBuffer -> base64 (chunked — apply() with the whole buffer blows
+    // the call stack on multi-megabyte PDFs).
+    function bufToBase64(buffer) {
+        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        let bin = '';
+        const CHUNK = 0x8000;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        }
+        return btoa(bin);
+    }
+
+    function isSameOriginUrl(u) {
+        try { return new URL(u, location.href).origin === location.origin; }
+        catch (e) { return false; }
+    }
+
+    // ============================================================
+    // Browser-fetch engine (v1.5)
+    // ============================================================
+    // QZ Tray downloads URLs ITSELF when handed one — with no browser
+    // session, no cookies, no Laravel auth. An auth-protected route
+    // therefore returned login HTML to QZ ("Cannot parse … End-of-File").
+    //
+    // v1.5 fixes that on the client: same-origin URLs are fetched BY THE
+    // PAGE first (session cookies flow automatically), the Content-Type
+    // picks the print path, and the bytes go to QZ as base64:
+    //
+    //   application/pdf   -> QZ pdf payload   (mPDF ->stream() / ->download())
+    //   image/*           -> QZ image payload
+    //   text/html         -> QZ html payload  (auth-protected print views!)
+    //
+    // Modes: 'auto' (default) same-origin only | 'always' | 'never' / false.
+    // Per call: printUrl(url, { fetch: true | false }). Misdirected
+    // responses (a login/404 page where a document was expected) are
+    // detected and NOT printed — the result explains why instead.
+    async function hydrateSpec(spec, forcedType, callOpts) {
+        if (!spec || !spec.url || spec.base64 || spec.data) return spec;
+        if (spec.type !== 'pdf' && spec.type !== 'image' && spec.type !== 'html') return spec;
+
+        const cfg = (typeof window !== 'undefined' && window.QZ_CONFIG) || {};
+        const mode = (callOpts && callOpts.fetch !== undefined) ? callOpts.fetch
+            : spec.fetch !== undefined ? spec.fetch
+            : (cfg.fetchMode !== undefined ? cfg.fetchMode : 'auto');
+        if (mode === false || mode === 'never') return spec;
+        if (mode !== 'always' && !isSameOriginUrl(spec.url)) return spec;
+
+        try {
+            const res = await fetch(spec.url, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: { 'Accept': 'application/pdf, image/*, text/html, */*' },
+            });
+
+            spec.hydrate = { ok: res.ok, status: res.status };
+            if (!res.ok) return spec; // keep url — QZ/fallback may still manage
+
+            const ct = String((res.headers && res.headers.get && res.headers.get('Content-Type')) || '')
+                .split(';')[0].trim().toLowerCase();
+            spec.hydrate.contentType = ct;
+
+            if (ct.indexOf('pdf') !== -1) {
+                spec.base64 = bufToBase64(await res.arrayBuffer());
+                spec.type = 'pdf';          // correct outcome beats a forced html guess
+            } else if (ct.indexOf('image/') === 0) {
+                spec.base64 = bufToBase64(await res.arrayBuffer());
+                spec.imageMime = ct;
+                if (forcedType !== 'pdf') spec.type = 'image';
+            } else if (ct.indexOf('text/') === 0 || ct.indexOf('xml') !== -1) {
+                const text = await res.text();
+                // A PDF/image URL that answers with text is a login/404/error
+                // page — never print that.
+                if (forcedType === 'pdf' || forcedType === 'image' || looksLikeDocumentUrl(spec.url)) {
+                    spec.hydrate.misdirected = true;
+                    return spec;
+                }
+                spec.data = text;
+                spec.type = 'html';
+            } else {
+                // octet-stream / JSON / unlabeled — sniff the leading bytes.
+                const buf = new Uint8Array(await res.arrayBuffer());
+                const is = (...sig) => sig.every((b, i) => buf[i] === b);
+                if (is(0x25, 0x50, 0x44, 0x46)) {                      // %PDF-
+                    spec.base64 = bufToBase64(buf); spec.type = 'pdf';
+                } else if (is(0x89, 0x50, 0x4E, 0x47)) {               // PNG
+                    spec.base64 = bufToBase64(buf); spec.imageMime = 'image/png'; spec.type = 'image';
+                } else if (is(0xFF, 0xD8)) {                           // JPEG
+                    spec.base64 = bufToBase64(buf); spec.imageMime = 'image/jpeg'; spec.type = 'image';
+                } else if (is(0x47, 0x49, 0x46)) {                     // GIF
+                    spec.base64 = bufToBase64(buf); spec.imageMime = 'image/gif'; spec.type = 'image';
+                } else {
+                    spec.hydrate.misdirected = true;                   // JSON/API error etc.
+                }
+            }
+
+            // Hydrated: QZ receives the BYTES; the original URL moves to
+            // sourceUrl so the browser fallback engines can still reach it.
+            if (spec.base64 || spec.data) {
+                spec.sourceUrl = spec.url;
+                spec.url = undefined;
+            }
+        } catch (e) {
+            spec.hydrate = { ok: false, error: String((e && e.message) || e) };
+        }
+        return spec;
+    }
+
+    // Snapshot a live DOM element into a standalone printable document.
+    // Stylesheets + <style> blocks are cloned so the printout matches the
+    // screen (toggle off with styles: false for raw-speed printing).
+    function captureElement(el, options) {
+        if (!el || !el.outerHTML) return '';
+        const styles = !(options && options.styles === false);
+        const html = (options && options.inner === true) ? el.innerHTML : el.outerHTML;
+        let head = '<title>Print</title>';
+        if (styles) {
+            try {
+                const links  = Array.from(document.querySelectorAll('link[rel="stylesheet"][href]'))
+                    .map(l => l.outerHTML).join('\n');
+                const styles_ = Array.from(document.querySelectorAll('style'))
+                    .map(s => s.outerHTML).join('\n');
+                head += '<base href="' + location.origin + location.pathname + '">'
+                     + links + '\n' + styles_;
+            } catch (e) { /* headless/edge-case DOMs — print unstyled */ }
+        }
+        return '<!DOCTYPE html><html><head>' + head + '</head>'
+             + '<body style="margin:0;padding:0">' + html + '</body></html>';
+    }
+
+    // Guess pdf / image / html for a URL when the caller did not say.
+    // Extension-less Laravel routes (the common case) default to pdf.
+    function sniffType(url) {
+        const s = String(url);
+        if (/\.(png|jpe?g|gif|webp|svg|bmp)([?#]|$)/i.test(s)) return 'image';
+        if (/\.pdf([?#]|$)/i.test(s)) return 'pdf';
+        return /\.(html?|php|aspx?)([?#]|$)|\/print\b/i.test(s) ? 'html' : 'pdf';
+    }
+
+    // Looks like a direct document link (.pdf / image extension)? Used to
+    // decide whether a text response is a misdirected login/error page.
+    function looksLikeDocumentUrl(url) {
+        return /\.(pdf|png|jpe?g|gif|webp|svg|bmp)([?#]|$)/i.test(String(url));
+    }
+
+    // Reduce ONE input (already resolved from functions/arrays) to a spec:
+    // { type, url?, data?, base64?, element?, filename?, ...per-input opts }.
+    // Accepted shapes: url string | css selector | HTMLElement |
+    // {url|html|pdf|base64|element|el|selector|zpl|escpos|raw|type+data} |
+    // data:application/pdf;base64,... strings.
+    function resolveOne(input) {
+        if (input === null || input === undefined) return null;
+
+        if (typeof input === 'string') {
+            const s = input.trim();
+            if (!s) return null;
+
+            if (/^data:[^,]*;base64,/i.test(s)) {
+                const raw = s.replace(/^[^,]*,/, '');
+                if (/^data:application\/pdf/i.test(s)) return { type: 'pdf', base64: raw };
+                const m = s.match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+                if (m) return { type: 'image', base64: raw, imageMime: m[1].toLowerCase() };
+                // any other data: URI (svg text, unknown binary…) -> <img> wrapper
+                return { type: 'html', data: '<img src="' + s + '" style="max-width:100%">' };
+            }
+            // Long base64-looking payload (no scheme, no selector chars)
+            if (s.length >= 32 && /^[A-Za-z0-9+/]+={0,2}$/.test(s)) {
+                if (/^JVBER/i.test(s)) return { type: 'pdf', base64: s };           // "%PDF-"
+                if (/^(iVBOR|\/9j\/|R0lGOD|UklGR)/i.test(s)) return { type: 'image', base64: s };
+                return { type: 'pdf', base64: s };                                  // PDFs dominate
+            }
+            // Raw HTML fragment (printHtml('<h1>…</h1>')) — needs a leading tag
+            if (/^\s*<(?:!doctype|html|head|body|div|span|table|thead|tbody|tr|td|th|h[1-6]|p|ul|ol|li|img|section|article|main|form|style|svg|a)\b/i.test(s)) {
+                return { type: 'html', data: s };
+            }
+            if (/^(https?:)?\/\//i.test(s) || /^blob:/i.test(s) || s.charAt(0) === '/') {
+                return { type: sniffType(s), url: s };
+            }
+            // Not a URL shape — try it as a CSS selector (#id, .class, any selector)
+            const el = querySelectorSafe(s);
+            if (el) return { type: 'html', element: el };
+            // Last resort: treat as a relative URL
+            return { type: sniffType(s), url: s };
+        }
+
+        if (typeof input === 'object') {
+            // A live DOM node (or jQuery object, courtesy of instanceof-safe duck typing)
+            if (typeof HTMLElement !== 'undefined' && input instanceof HTMLElement) {
+                return { type: 'html', element: input };
+            }
+            if (typeof input.length === 'number' && typeof input.jquery !== 'undefined') {
+                return input.length ? { type: 'html', element: input[0] } : null;
+            }
+
+            const spec = {};
+            if (input.type) spec.type = String(input.type).toLowerCase();
+            if (input.url !== undefined) {
+                spec.url = input.url;
+                if (!spec.type) spec.type = sniffType(input.url);
+            }
+            if (input.html !== undefined) { spec.type = 'html'; spec.data = input.html; }
+            if (input.pdf !== undefined) {
+                spec.type = 'pdf';
+                if (typeof input.pdf === 'string' && !/^(https?:)?\/\/|^\/|^blob:/i.test(input.pdf)) {
+                    spec.base64 = input.pdf;          // raw base64 payload
+                } else {
+                    spec.url = input.pdf;             // URL
+                }
+            }
+            if (input.base64 !== undefined) {
+                if (!spec.type) spec.type = (input.mime && /image|text/.test(input.mime)) ? 'html' : 'pdf';
+                if (spec.type === 'html') spec.data = input.base64;
+                else spec.base64 = input.base64;
+            }
+            if (input.element || input.el) { spec.type = spec.type || 'html'; spec.element = input.element || input.el; }
+            if (input.selector) {
+                const el = querySelectorSafe(input.selector);
+                if (el) { spec.type = spec.type || 'html'; spec.element = el; }
+            }
+            if (input.zpl !== undefined)   { spec.type = 'zpl';    spec.data = input.zpl; }
+            if (input.escpos !== undefined){ spec.type = 'escpos'; spec.data = input.escpos; }
+            if (input.raw  !== undefined)  { spec.type = input.rawType || 'raw'; spec.data = input.raw; }
+            if (input.data !== undefined && !spec.data && !spec.base64) {
+                spec.data = input.data;
+                if (!spec.type) spec.type = input.format === 'base64' ? 'pdf' : (input.type === 'html' ? 'html' : 'raw');
+            }
+
+            // Per-input overrides flow through to specToJob
+            ['printer', 'copies', 'profile', 'fallback', 'filename', 'styles', 'mime', 'rawType', 'imageMime', 'fetch'].forEach(k => {
+                if (input[k] !== undefined) spec[k] = input[k];
+            });
+
+            if (spec.type || spec.url || spec.data || spec.base64 || spec.element) return spec;
+        }
+
+        return null;
+    }
+
+    // Flatten any input into a list of specs. Functions are invoked lazily
+    // (so a button can resolve its URL at click time), arrays fan out into
+    // sequential batch printing.
+    function resolveInputs(input) {
+        if (input === undefined || input === null) return [];
+        if (typeof input === 'function') return resolveInputs(input());
+        if (Array.isArray(input)) {
+            const out = [];
+            input.forEach(item => out.push(...resolveInputs(item)));
+            return out;
+        }
+        const one = resolveOne(input);
+        return one ? [one] : [];
+    }
+
+    // Merge one spec + the action template + per-call overrides into a job
+    // the existing queue/printQZ/fallback pipeline already understands.
+    function specToJob(spec, tpl, overrides) {
+        const pick = (key, fallbackValue) =>
+            overrides[key] !== undefined ? overrides[key]
+            : spec[key]   !== undefined ? spec[key]
+            : tpl[key]    !== undefined ? tpl[key]
+            : fallbackValue;
+
+        const type = String(pick('type', null) || spec.type || tpl.type || 'pdf').toLowerCase();
+        const job = {
+            type,
+            url:     spec.url || undefined,
+            data:    spec.data || undefined,
+            base64:  spec.base64 || undefined,
+            imageMime: pick('imageMime', undefined),
+            element: spec.element || undefined,
+            printer: resolveAlias(pick('printer', null)) || undefined,
+            copies:  parseInt(pick('copies', 1), 10) || 1,
+            profile: pick('profile', undefined),
+            fallback: pick('fallback', undefined),
+            filename: pick('filename', undefined),
+            styles:   pick('styles', undefined),
+            onComplete: overrides.onComplete || tpl.onComplete,
+            onError:    overrides.onError    || tpl.onError,
+        };
+
+        // PDF / image via base64: feed QZ its native payload shape
+        if (type === 'pdf' && !job.url && job.base64) job.data = job.base64;
+        if (type === 'image' && !job.url && job.base64) job.data = job.base64;
+
+        // HTML captured from a live element: snapshot NOW, before the queue
+        // reaches the job (the element may re-render between click and print)
+        if (type === 'html' && job.element && !job.data) {
+            job.data = captureElement(job.element, job);
+        }
+
+        return job;
+    }
+
+    // ---- action registry -------------------------------------------------
+    const actions = {};
+    const printerAliases = {};
+
+    function resolveAlias(printer) {
+        return (printer && printerAliases[printer]) ? printerAliases[printer] : printer;
+    }
+
+    // Map a friendly alias onto a real OS printer name. Aliases resolve at
+    // PRINT time (not queue time), so a mapping added later still applies to
+    // already-queued jobs, and re-mapping before a big batch just works:
+    //   SmartPrint.aliasPrinter('receipt', 'XP-80C');
+    //   SmartPrint.aliasPrinter('label',   'Zebra GK420d');
+    function aliasPrinter(alias, realPrinter) {
+        if (typeof alias !== 'string' || !alias) return apiRef;
+        if (realPrinter === null || realPrinter === undefined) {
+            delete printerAliases[alias]; // unmap
+        } else {
+            printerAliases[alias] = String(realPrinter);
+        }
+        return apiRef;
+    }
+
+    // Forward declaration — assigned just before the Proxy below so
+    // define()/window-globals can reference the public API.
+    let apiRef;
+
+    async function run(name, input, overrides) {
+        const tpl = actions[name];
+        if (!tpl) {
+            throw new Error('[SmartPrint] unknown action "' + name + '" — register it first: '
+                + "SmartPrint.define('" + name + "', { ... })");
+        }
+
+        const opts = overrides || {};
+
+        // v1.5: printElement(s) — an unmatched selector must error clearly,
+        // not silently degrade into a relative-URL guess.
+        if (tpl.elementOnly && typeof input === 'string') {
+            const el = querySelectorSafe(input);
+            if (!el || (typeof HTMLElement !== 'undefined' && !(el instanceof HTMLElement))) {
+                const err = new Error('[SmartPrint] ' + name + ': no element found for "' + input + '"');
+                safeCallback(opts.onError || tpl.onError, err, null);
+                throw err;
+            }
+            input = el;
+        }
+
+        // v1.5: printPage — snapshot the whole page, no input required.
+        if (tpl.page) {
+            if (opts.mode === 'browser') {
+                try { window.print(); } catch (e) { console.warn('[SmartPrint] window.print failed:', e); }
+                return { success: true, fallback: true, via: 'window.print' };
+            }
+            const pageOpts = Object.assign({}, opts, { inner: true });
+            return enqueue(specToJob(
+                { type: 'html', data: captureElement(document.body, pageOpts) },
+                { type: 'html' }, opts));
+        }
+
+        const specs = resolveInputs(input !== undefined ? input : tpl.input);
+
+        if (!specs.length) {
+            const err = new Error('[SmartPrint] action "' + name + '" has nothing to print '
+                + '(pass a URL, base64, selector or element)');
+            safeCallback(opts.onError || tpl.onError, err, null);
+            throw err;
+        }
+
+        // v1.5: browser-fetch hydration — same-origin URLs are downloaded by
+        // the PAGE (session cookies included) before reaching QZ Tray, which
+        // itself has no session. See hydrateSpec().
+        const forcedType = tpl.type || undefined;
+        const results = [];
+        for (let spec of specs) {
+            spec = await hydrateSpec(spec, forcedType, opts);
+            if (spec.hydrate && spec.hydrate.misdirected) {
+                console.warn('[SmartPrint] ' + name + ': ' + spec.url + ' returned '
+                    + (spec.hydrate.contentType || 'unknown')
+                    + ' (HTTP ' + (spec.hydrate.status || '?') + ') — login/error page? Nothing printed.');
+                results.push({
+                    success: false,
+                    reason: 'unexpected-response',
+                    url: spec.url,
+                    contentType: spec.hydrate.contentType || undefined,
+                    status: spec.hydrate.status || undefined,
+                });
+                continue;
+            }
+            results.push(await enqueue(specToJob(spec, tpl, opts)));
+        }
+        return results.length === 1 ? results[0] : results;
+    }
+
+    // Register (or replace) a named action. Also installs a window global
+    // (printLabReceipt(...) etc.) when the name is free — guarded, so an
+    // existing app function is NEVER silently overwritten.
+    function define(name, template) {
+        if (name && typeof name === 'object' && !Array.isArray(name)) {
+            Object.keys(name).forEach(key => define(key, name[key]));
+            return apiRef;
+        }
+        if (typeof name !== 'string' || !name) return apiRef;
+
+        actions[name] = (template === true || template === undefined) ? {} : (template || {});
+
+        try {
+            if (window[name] === undefined) {
+                window[name] = (input, overrides) => run(name, input, overrides);
+            } else if (window[name] !== apiRef && typeof console !== 'undefined') {
+                console.warn('[SmartPrint] define("' + name + '"): window.' + name
+                    + ' already exists and was left untouched — call SmartPrint.run("' + name
+                    + '", ...) directly, or remove the old function.');
+            }
+        } catch (e) { /* sandboxed window — global helpers unavailable */ }
+
+        return apiRef;
+    }
+
+    function status() {
+        return {
+            qzLibrary:      !!window.qz,
+            connected:      !!(window.qz && qz.websocket.isActive()),
+            printers:       [...state.printers],
+            currentPrinter: state.currentPrinter,
+            queued:         state.queue.length,
+            failed:         state.failedQueue.length,
+            fallbackMode:   resolveFallbackMode({}),
+            actions:        Object.keys(actions),
+        };
+    }
+
+    // Resolves as soon as the tray connection is known — either established,
+    // or definitively NOT available (missing library / refused). Never hangs
+    // longer than timeoutMs, so callers can branch without waiting forever.
+    function whenReady(timeoutMs) {
+        timeoutMs = parseInt(timeoutMs, 10) || 5000;
+        if (window.qz && qz.websocket.isActive()) {
+            return Promise.resolve({ ok: true, reason: 'connected', printers: [...state.printers] });
+        }
+        return new Promise(resolve => {
+            let settled = false;
+            const finish = result => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(result);
+            };
+            const onConnected = () => finish({ ok: true, reason: 'connected', printers: [...state.printers] });
+            const timer = setTimeout(() => {
+                off('connected', onConnected);
+                finish({ ok: false, reason: window.qz ? 'timeout' : 'qz-library-missing' });
+            }, timeoutMs);
+            on('connected', onConnected);
+            if (window.qz) {
+                connectQZ(1).then(ok => { if (!ok) finish({ ok: false, reason: 'connection-refused' }); });
+            } else {
+                finish({ ok: false, reason: 'qz-library-missing' });
+            }
+        });
+    }
+
+    const publicApi = {
         // Core
         init,
         bind,
@@ -969,6 +1935,33 @@ window.SmartPrint = (() => {
         printRaw: (data, type, printer) => enqueue({ data, type: type || 'raw', printer, copies: 1 }),
         printZPL: (zpl, printer)   => enqueue({ data: zpl,   type: 'zpl',    printer, copies: 1 }),
         printESC: (escpos, printer) => enqueue({ data: escpos, type: 'escpos', printer, copies: 1 }),
+
+        // ---- Smart Actions (v1.5) -------------------------------------
+        version: '1.5.0',
+        define,                       // register named actions (+ window globals)
+        run,                          // run('printLabReceipt', input, overrides)
+        has:    name => !!actions[name],
+        actions: () => Object.keys(actions),
+        aliasPrinter,                 // aliasPrinter('receipt', 'XP-80C')
+        whenReady,                    // promise: is the tray usable or not?
+        status,                       // full health snapshot
+
+        // ---- Universal Print API (v1.5) --------------------------------
+        // Routed through run() so every call gets the full pipeline: input
+        // resolvers, browser-fetch hydration, per-call overrides, fallback.
+        printUrl:      (input, options) => run('printUrl',      input, options),
+        printUrls:     (input, options) => run('printUrls',     input, options),
+        printAnyUrl:   (input, options) => run('printUrl',      input, options),
+        printAnyUrls:  (input, options) => run('printUrls',     input, options),
+        printPdf:      (input, options) => run('printPdf',      input, options),
+        printPdfs:     (input, options) => run('printPdfs',     input, options),
+        printImage:    (input, options) => run('printImage',    input, options),
+        printImages:   (input, options) => run('printImages',   input, options),
+        printHtml:     (input, options) => run('printHtml',     input, options),
+        printHTML:     (input, options) => run('printHtml',     input, options), // v1.5 alias
+        printElement:  (input, options) => run('printElement',  input, options),
+        printElements: (input, options) => run('printElements', input, options),
+        printPage:     (options)        => run('printPage',     undefined, options),
 
         // Printer management
         setPrinter:          rememberPrinter,
@@ -1008,6 +2001,59 @@ window.SmartPrint = (() => {
             emit('cache-cleared');
         },
     };
+
+    apiRef = publicApi;
+
+    // ============================
+    // Built-in universal actions (v1.5)
+    // ============================
+    // The generic names work out of the box — no define() needed. define()
+    // registers the action AND creates a guarded window global, so plain
+    // calls like printUrl('/receipt/5.pdf') or printPdfs([...]) just work,
+    // as does <button data-qz-action="printUrl" data-qz-url="...">.
+    // A later SmartPrint.define() with the same name (e.g. the app defining
+    // printLabReceipt with a preset) cleanly overrides these templates.
+    const BUILTIN_ACTIONS = {
+        printUrl:      {},                                // type auto-detected
+        printUrls:     {},                                // array = sequential batch
+        printAnyUrl:   {},                                // readability alias
+        printAnyUrls:  {},                                // readability alias
+        printPdf:      { type: 'pdf' },
+        printPdfs:     { type: 'pdf' },
+        printImage:    { type: 'image' },
+        printImages:   { type: 'image' },
+        printHtml:     { type: 'html' },
+        printElement:  { type: 'html', elementOnly: true },
+        printElements: { type: 'html', elementOnly: true },
+        printPage:     { page: true },
+        // v1.5 business names kept working — now plain aliases:
+        printLabReceipt:  {},
+        printLabReceipts: {},
+    };
+    Object.keys(BUILTIN_ACTIONS).forEach(n => define(n, BUILTIN_ACTIONS[n]));
+
+    // v1.5: Proxy magic — any registered action becomes a first-class method:
+    //   SmartPrint.printLabReceipt('/receipt/5.pdf')
+    //   SmartPrint.printLabReceipts([url1, url2])
+    // Works even before you know the action names at authoring time.
+    // (Proxy exists in every supported browser; older WebViews simply use
+    // SmartPrint.run(name, ...) and the window globals from define().)
+    if (typeof Proxy !== 'undefined') {
+        return new Proxy(publicApi, {
+            get(target, prop) {
+                if (prop in target) return target[prop];
+                if (typeof prop === 'string' && actions[prop]) {
+                    return (input, overrides) => run(prop, input, overrides);
+                }
+                return undefined;
+            },
+            has(target, prop) {
+                return prop in target || (typeof prop === 'string' && !!actions[prop]);
+            },
+        });
+    }
+
+    return publicApi;
 })();
 
 // ============================
@@ -1028,5 +2074,33 @@ if (typeof window.smartPrintZPL === 'undefined') {
 if (typeof window.smartPrintESC === 'undefined') {
     window.smartPrintESC = function (escpos, printer) {
         return SmartPrint.printESC(escpos, printer);
+    };
+}
+
+// v1.5 — HTML/element/PDF shortcuts + run-anywhere action runner.
+// All guarded against name collisions with the host app.
+if (typeof window.smartPrintHTML === 'undefined') {
+    window.smartPrintHTML = function (html, options) {
+        return SmartPrint.printHTML(html, options);
+    };
+}
+if (typeof window.smartPrintPdf === 'undefined') {
+    window.smartPrintPdf = function (input, options) {
+        return SmartPrint.printPdf(input, options);
+    };
+}
+if (typeof window.printElement === 'undefined') {
+    window.printElement = function (selector, options) {
+        return SmartPrint.printElement(selector, options);
+    };
+}
+if (typeof window.smartPrintRun === 'undefined') {
+    window.smartPrintRun = function (name, input, overrides) {
+        return SmartPrint.run(name, input, overrides);
+    };
+}
+if (typeof window.smartPrintDefine === 'undefined') {
+    window.smartPrintDefine = function (name, template) {
+        return SmartPrint.define(name, template);
     };
 }
