@@ -3,6 +3,7 @@
 namespace Bitdreamit\QzTray\Console\Commands;
 
 use Bitdreamit\QzTray\Support\CertKit;
+use Bitdreamit\QzTray\Support\ZipBuilder;
 use Illuminate\Console\Command;
 
 /**
@@ -36,7 +37,7 @@ class ClientBundle extends Command
                             {--lna-domains= : Comma-separated domains for the Chrome/Edge LocalNetworkAccess policy (default: config qz-tray.client_bundle.lna_domains)}
                             {--no-lna : Skip the Chrome/Edge Local Network Access policy step}
                             {--no-allow : Skip the allowed.dat whitelisting step}
-                            {--zip : Also produce a ready-to-distribute .zip (requires ext-zip)}';
+                            {--zip : Also produce a ready-to-distribute .zip (pure-PHP fallback when ext-zip is missing)}';
 
     protected $description = 'Build the Windows client trust bundle (override.crt + PowerShell setup script + provision.json) for zero-prompt QZ Tray';
 
@@ -219,37 +220,81 @@ class ClientBundle extends Command
             ."qz-client-bundle.zip      (when built with --zip) everything above zipped\n";
         CertKit::writeAtomic($bundleDir.'/README.txt', $readme, 0644);
 
-        // Stamp with the cert fingerprint so the /qz/client-bundle endpoint
-        // knows when the bundle is stale and rebuilds itself automatically.
-        CertKit::writeAtomic($bundleDir.'/.built-stamp', md5_file($certPath), 0644);
-
-        // 8. Optional zip
+        // 8. Optional zip. v1.4.2: ZipArchive's close() — the step that
+        // actually WRITES the archive — used to go unchecked, so a quota or
+        // open_basedir failure silently left a corrupt archive on disk that
+        // clients downloaded as an "invalid zip". We now verify close(),
+        // delete any partial result, and fall back to a spec-compliant
+        // pure-PHP writer that needs no extensions at all (common on cPanel
+        // builds where php-zip is missing).
         $zipPath = null;
         if ($this->option('zip')) {
-            if (! extension_loaded('zip')) {
-                $this->warn('⚠️  ext-zip not loaded — skipping .zip creation (bundle files are still in '.$bundleDir.').');
-            } else {
-                $zipPath = $bundleDir.'/qz-client-bundle.zip';
-                if (is_file($zipPath)) {
-                    @unlink($zipPath);
-                }
+            $zipPath = $bundleDir.'/qz-client-bundle.zip';
 
+            $zipFiles = [
+                $bundleDir.'/override.crt'            => 'override.crt',
+                $bundleDir.'/digital-certificate.txt' => 'digital-certificate.txt',
+                $bundleDir.'/qz-client-setup.ps1'     => 'qz-client-setup.ps1',
+                $bundleDir.'/setup.bat'               => 'setup.bat',
+                $bundleDir.'/provision.json'          => 'provision.json',
+                $bundleDir.'/README.txt'              => 'README.txt',
+            ];
+
+            $built  = false;
+            $reason = '';
+
+            if (extension_loaded('zip')) {
                 $zip = new \ZipArchive();
 
-                if ($zip->open($zipPath, \ZipArchive::CREATE) === true) {
-                    foreach (['override.crt', 'digital-certificate.txt', 'qz-client-setup.ps1', 'setup.bat', 'provision.json', 'README.txt'] as $file) {
-                        if (is_file($bundleDir.'/'.$file)) {
-                            $zip->addFile($bundleDir.'/'.$file, $file);
+                if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) === true) {
+                    foreach ($zipFiles as $src => $name) {
+                        if (is_file($src)) {
+                            $zip->addFile($src, $name);
                         }
                     }
-                    $zip->close();
-                    $this->line('  📦 Zip: '.$zipPath);
+
+                    $built = $zip->close() === true && is_file($zipPath) && filesize($zipPath) > 0;
+
+                    if (! $built) {
+                        $reason = 'ZipArchive failed to finalise the archive (quota / open_basedir?)';
+                    }
                 } else {
-                    $this->warn('⚠️  Unable to create zip at '.$zipPath);
-                    $zipPath = null;
+                    $reason = 'ZipArchive could not open the target file';
+                }
+
+                if (! $built) {
+                    @unlink($zipPath); // never leave a partial archive behind
+                }
+            } else {
+                $reason = 'ext-zip not loaded';
+            }
+
+            if (! $built) {
+                $fbError = null;
+                $built   = ZipBuilder::build($zipFiles, $zipPath, $fbError);
+
+                if (! $built) {
+                    $reason = trim($reason.'; pure-PHP fallback: '.($fbError ?? 'unknown error'), '; ');
                 }
             }
+
+            if ($built) {
+                $sha = hash_file('sha256', $zipPath) ?: 'n/a';
+                $this->line('  📦 Zip: '.$zipPath);
+                $this->line('     Size: '.number_format((float) filesize($zipPath) / 1024, 1).' KB | sha256: '.$sha);
+                $this->line('     Verify after download (Windows): certutil -hashfile qz-client-bundle.zip SHA256');
+            } else {
+                $this->warn('⚠️  Zip could not be created ('.$reason.').');
+                $this->line('   The bundle files themselves are fine in '.$bundleDir.' — distribute the folder directly or zip it up manually.');
+                $zipPath = null;
+            }
         }
+
+        // Stamp with the cert fingerprint so the /qz/client-bundle endpoint
+        // knows when the bundle is stale and rebuilds itself automatically.
+        // v1.4.2: written AFTER the (optional) zip so a failed zip build can
+        // never leave a fresh stamp in front of a stale or corrupt archive.
+        CertKit::writeAtomic($bundleDir.'/.built-stamp', md5_file($certPath), 0644);
 
         $this->newLine();
         $this->info('✅ Client bundle built: '.$bundleDir);

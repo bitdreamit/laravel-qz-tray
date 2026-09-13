@@ -3,6 +3,33 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.2] — 2026-09-13
+
+### Fixed
+- **"Invalid zip" downloads of qz-client-bundle.zip.** Three independent
+  causes, all addressed:
+  1. `qz:client-bundle --zip` never checked `ZipArchive::close()` — the call
+     that actually writes the archive — so a disk-quota / `open_basedir`
+     failure silently left a corrupt (often zero-entry) archive on disk that
+     clients then downloaded. `close()` is now verified, partial results are
+     deleted, and the freshness stamp (`.built-stamp`) is written *after* the
+     zip so the HTTP endpoint cannot mistake a corrupt archive for a fresh one.
+  2. **New: pure-PHP zip fallback** (`Support\ZipBuilder`, STORE method,
+     CRC-32 per entry, atomic rename, self-check before write). Hosts without
+     `ext-zip` — very common on cPanel CLI builds — now produce a valid zip
+     instead of skipping it, and a failing ZipArchive degrades gracefully
+     instead of leaving garbage behind.
+  3. `GET /qz/client-bundle` streamed the file through the output buffers,
+     where a UTF-8 BOM, a PHP deprecation notice or Laravel Debugbar output
+     could ride along and make Windows reject a zip that was fine on disk.
+     The endpoint now discards every output buffer and serves a
+     `BinaryFileResponse` (Content-Length included, `streamDownload` removed),
+     so browsers fail loudly instead of saving truncated data.
+- The `ext-zip` 503 gate on `GET /qz/client-bundle` was removed — serving a
+  static file needs no extension, and builds are covered by the fallback.
+- CLI output now prints the zip's size and SHA-256, so a download can be
+  verified on Windows with `certutil -hashfile qz-client-bundle.zip SHA256`.
+
 ## [1.4.1] — 2026-09-13
 
 ### Fixed

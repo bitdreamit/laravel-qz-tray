@@ -2,12 +2,20 @@
 
 namespace Bitdreamit\QzTray\Http\Controllers;
 
+use Barryvdh\DomPDF\Facade\Pdf;
+use Bitdreamit\QzTray\Events\PrintJobLogged;
+use Bitdreamit\QzTray\Events\PrintJobStatusUpdated;
+use Bitdreamit\QzTray\QzTrayServiceProvider;
 use Bitdreamit\QzTray\Support\CertKit;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use Symfony\Component\HttpFoundation\StreamedResponse;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class QzSecurityController extends Controller
 {
@@ -32,22 +40,22 @@ class QzSecurityController extends Controller
      */
     public function wizard()
     {
-        $prefix   = config('qz-tray.routes.prefix', 'qz');
+        $prefix = config('qz-tray.routes.prefix', 'qz');
         $certPath = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
 
         $fingerprint = null;
-        $subjectCn   = null;
-        $mode        = 'self-signed';
-        $daysLeft    = null;
+        $subjectCn = null;
+        $mode = 'self-signed';
+        $daysLeft = null;
 
         if (is_file($certPath) && extension_loaded('openssl')) {
             try {
-                $pem         = (string) file_get_contents($certPath);
+                $pem = (string) file_get_contents($certPath);
                 $fingerprint = CertKit::fingerprintSha1Pretty($pem);
-                $parsed      = openssl_x509_parse($pem);
-                $subjectCn   = $parsed['subject']['CN'] ?? null;
-                $daysLeft    = CertKit::daysUntilExpiry($pem);
-                $trust       = $this->trustSummary([
+                $parsed = openssl_x509_parse($pem);
+                $subjectCn = $parsed['subject']['CN'] ?? null;
+                $daysLeft = CertKit::daysUntilExpiry($pem);
+                $trust = $this->trustSummary([
                     'self_signed' => isset($parsed['subject'], $parsed['issuer']) ? $parsed['subject'] === $parsed['issuer'] : null,
                 ]);
                 $mode = $trust['mode'];
@@ -57,20 +65,20 @@ class QzSecurityController extends Controller
         }
 
         return view('qz-tray::wizard', [
-            'fingerprint'   => $fingerprint,
-            'subjectCn'     => $subjectCn,
-            'mode'          => $mode,
-            'daysLeft'      => $daysLeft,
-            'prefix'        => $prefix,
-            'statusUrl'     => url("/{$prefix}/status"),
-            'certUrl'       => url("/{$prefix}/certificate"),
-            'caCertUrl'     => url("/{$prefix}/ca-certificate"),
-            'bundleUrl'     => url("/{$prefix}/client-bundle"),
-            'installerUrl'  => url("/{$prefix}/installer/windows"),
+            'fingerprint' => $fingerprint,
+            'subjectCn' => $subjectCn,
+            'mode' => $mode,
+            'daysLeft' => $daysLeft,
+            'prefix' => $prefix,
+            'statusUrl' => url("/{$prefix}/status"),
+            'certUrl' => url("/{$prefix}/certificate"),
+            'caCertUrl' => url("/{$prefix}/ca-certificate"),
+            'bundleUrl' => url("/{$prefix}/client-bundle"),
+            'installerUrl' => url("/{$prefix}/installer/windows"),
         ]);
     }
 
-    public function certificate(): \Illuminate\Http\Response
+    public function certificate(): Response
     {
         $certPath = config('qz-tray.cert_path');
 
@@ -86,11 +94,11 @@ class QzSecurityController extends Controller
             file_get_contents($certPath),
             200,
             [
-                'Content-Type'  => 'text/plain',
+                'Content-Type' => 'text/plain',
                 'Cache-Control' => $ttl > 0
-                    ? 'public, max-age=' . $ttl
+                    ? 'public, max-age='.$ttl
                     : 'no-store, no-cache, must-revalidate',
-                'Pragma'        => 'no-cache',
+                'Pragma' => 'no-cache',
             ]
         );
     }
@@ -102,13 +110,13 @@ class QzSecurityController extends Controller
      * NO secrets. Gated by qz-tray.routes.serve_ca (disable when the bundle
      * is distributed out-of-band via GPO/Intune instead).
      */
-    public function caCertificate(): \Illuminate\Http\Response
+    public function caCertificate(): Response
     {
         if (! config('qz-tray.routes.serve_ca', true)) {
             abort(404);
         }
 
-        $caCertPath   = (string) (config('qz-tray.certificate.ca.cert_path') ?: storage_path('qz/ca/qz-root-ca.crt'));
+        $caCertPath = (string) (config('qz-tray.certificate.ca.cert_path') ?: storage_path('qz/ca/qz-root-ca.crt'));
         $siteCertPath = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
 
         $path = is_file($caCertPath) ? $caCertPath : $siteCertPath;
@@ -120,9 +128,9 @@ class QzSecurityController extends Controller
         $filename = is_file($caCertPath) ? 'qz-root-ca.crt' : 'override.crt';
 
         return response(file_get_contents($path), 200, [
-            'Content-Type'        => 'application/x-x509-ca-cert',
+            'Content-Type' => 'application/x-x509-ca-cert',
             'Content-Disposition' => 'attachment; filename="'.$filename.'"',
-            'Cache-Control'       => 'no-store',
+            'Cache-Control' => 'no-store',
         ]);
     }
 
@@ -130,27 +138,23 @@ class QzSecurityController extends Controller
      * GET /qz/client-bundle — download the ready-made Windows trust bundle
      * (override.crt + qz-client-setup.ps1 + setup.bat + provision.json +
      * README). Built on first request via the same code path as
-     * `php artisan qz:client-bundle`. Requires ext-zip for the download
-     * variant; the CLI command also works without it.
+     * `php artisan qz:client-bundle`. v1.4.2: works on hosts without
+     * ext-zip too — the build command falls back to a pure-PHP zip writer.
      */
-    public function clientBundle(): StreamedResponse
+    public function clientBundle(): BinaryFileResponse
     {
         if (! config('qz-tray.routes.serve_bundle', true)) {
             abort(404);
         }
 
-        if (! extension_loaded('zip')) {
-            abort(503, 'PHP ext-zip is required for the bundle download. Run `php artisan qz:client-bundle --zip` on the server instead.');
-        }
-
         $bundleDir = storage_path('qz/client-bundle');
-        $zipPath   = $bundleDir.'/qz-client-bundle.zip';
+        $zipPath = $bundleDir.'/qz-client-bundle.zip';
         $stampPath = $bundleDir.'/.built-stamp';
 
         // Rebuild when missing or when the signing cert changed since build.
-        $certPath    = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
-        $certStamp   = is_file($certPath) ? md5_file($certPath) : 'missing';
-        $needsBuild  = ! is_file($zipPath) || ! is_file($stampPath) || file_get_contents($stampPath) !== $certStamp;
+        $certPath = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
+        $certStamp = is_file($certPath) ? md5_file($certPath) : 'missing';
+        $needsBuild = ! is_file($zipPath) || ! is_file($stampPath) || file_get_contents($stampPath) !== $certStamp;
 
         if ($needsBuild) {
             try {
@@ -172,15 +176,23 @@ class QzSecurityController extends Controller
             abort(500, 'Client bundle could not be built. Run: php artisan qz:client-bundle --zip');
         }
 
-        return response()->streamDownload(function () use ($zipPath) {
-            echo file_get_contents($zipPath);
-        }, 'qz-client-bundle.zip', [
-            'Content-Type' => 'application/zip',
+        // v1.4.2: serve as a BinaryFileResponse with every output buffer
+        // discarded first. Stray bytes that used to ride along in the
+        // streamed response — a UTF-8 BOM from an included file, a PHP
+        // deprecation notice, Laravel Debugbar output — are enough to make
+        // Windows declare the archive "invalid" even when the zip on disk
+        // was perfectly fine. BinaryFileResponse also adds Content-Length,
+        // which lets browsers fail loudly instead of saving truncated data.
+        while (ob_get_level() > 0) {
+            @ob_end_clean();
+        }
+
+        return response()->download($zipPath, 'qz-client-bundle.zip', [
             'Cache-Control' => 'no-store',
         ]);
     }
 
-    public function sign(Request $request): \Illuminate\Http\Response
+    public function sign(Request $request): Response
     {
         $data = $request->input('data');
 
@@ -214,12 +226,12 @@ class QzSecurityController extends Controller
         return response(base64_encode($signature), 200, ['Content-Type' => 'text/plain']);
     }
 
-    public function status(): \Illuminate\Http\JsonResponse
+    public function status(): JsonResponse
     {
         $certPath = config('qz-tray.cert_path');
-        $keyPath  = config('qz-tray.key_path');
+        $keyPath = config('qz-tray.key_path');
         $certExists = $certPath && file_exists($certPath);
-        $keyExists  = $keyPath  && file_exists($keyPath);
+        $keyExists = $keyPath && file_exists($keyPath);
         $prefix = config('qz-tray.routes.prefix', 'qz');
 
         // v1.3.0: expose the certificate fingerprint + issuer so operators can
@@ -232,32 +244,32 @@ class QzSecurityController extends Controller
             if (is_array($parsed)) {
                 $sha1 = openssl_x509_fingerprint((string) file_get_contents($certPath), 'sha1');
                 $certDetails = [
-                    'subject_cn'   => $parsed['subject']['CN'] ?? null,
+                    'subject_cn' => $parsed['subject']['CN'] ?? null,
                     'organization' => $parsed['subject']['O'] ?? null,
-                    'issuer_cn'    => $parsed['issuer']['CN'] ?? null,
-                    'self_signed'  => (isset($parsed['subject'], $parsed['issuer'])) ? $parsed['subject'] === $parsed['issuer'] : null,
+                    'issuer_cn' => $parsed['issuer']['CN'] ?? null,
+                    'self_signed' => (isset($parsed['subject'], $parsed['issuer'])) ? $parsed['subject'] === $parsed['issuer'] : null,
                     'fingerprint_sha1' => $sha1 ? implode(':', str_split($sha1, 2)) : null,
-                    'valid_to'     => isset($parsed['validTo_time_t']) ? date('c', $parsed['validTo_time_t']) : null,
-                    'shared_path'  => $certPath !== storage_path('qz/digital-certificate.txt'),
+                    'valid_to' => isset($parsed['validTo_time_t']) ? date('c', $parsed['validTo_time_t']) : null,
+                    'shared_path' => $certPath !== storage_path('qz/digital-certificate.txt'),
                 ];
             }
         }
 
         return response()->json([
-            'success'     => true,
-            'status'      => ($certExists && $keyExists) ? 'operational' : 'degraded',
+            'success' => true,
+            'status' => ($certExists && $keyExists) ? 'operational' : 'degraded',
             'certificate' => $certExists ? 'present' : 'missing',
-            'private_key' => $keyExists  ? 'present' : 'missing',
+            'private_key' => $keyExists ? 'present' : 'missing',
             'certificate_details' => $certDetails,
-            'trust'       => $this->trustSummary($certDetails),
-            'endpoints'   => [
+            'trust' => $this->trustSummary($certDetails),
+            'endpoints' => [
                 'certificate' => url("/{$prefix}/certificate"),
-                'sign'        => url("/{$prefix}/sign"),
+                'sign' => url("/{$prefix}/sign"),
                 'ca_certificate' => url("/{$prefix}/ca-certificate"),
-                'client_bundle'  => url("/{$prefix}/client-bundle"),
-                'setup_wizard'   => url("/{$prefix}/setup"),
+                'client_bundle' => url("/{$prefix}/client-bundle"),
+                'setup_wizard' => url("/{$prefix}/setup"),
             ],
-            'version'   => \Bitdreamit\QzTray\QzTrayServiceProvider::VERSION, // was hardcoded '1.0.0' (AUDIT M1)
+            'version' => QzTrayServiceProvider::VERSION, // was hardcoded '1.0.0' (AUDIT M1)
             'timestamp' => now()->toIso8601String(),
         ]);
     }
@@ -268,9 +280,9 @@ class QzSecurityController extends Controller
      */
     protected function trustSummary(?array $certDetails): array
     {
-        $caCertPath   = (string) (config('qz-tray.certificate.ca.cert_path') ?: storage_path('qz/ca/qz-root-ca.crt'));
-        $certPath     = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
-        $hasCa        = is_file($caCertPath);
+        $caCertPath = (string) (config('qz-tray.certificate.ca.cert_path') ?: storage_path('qz/ca/qz-root-ca.crt'));
+        $certPath = (string) (config('qz-tray.cert_path') ?: storage_path('qz/digital-certificate.txt'));
+        $hasCa = is_file($caCertPath);
         $leafChainsCa = false;
 
         if ($hasCa && is_file($certPath)) {
@@ -296,20 +308,20 @@ class QzSecurityController extends Controller
         }
 
         return [
-            'mode'                    => $mode,
-            'root_ca_present'         => $hasCa,
-            'leaf_chains_to_root_ca'  => $leafChainsCa,
-            'ca_certificate_url'      => url('/'.config('qz-tray.routes.prefix', 'qz').'/ca-certificate'),
-            'client_bundle_url'       => url('/'.config('qz-tray.routes.prefix', 'qz').'/client-bundle'),
-            'guide'                   => 'docs/zero-prompt.md',
+            'mode' => $mode,
+            'root_ca_present' => $hasCa,
+            'leaf_chains_to_root_ca' => $leafChainsCa,
+            'ca_certificate_url' => url('/'.config('qz-tray.routes.prefix', 'qz').'/ca-certificate'),
+            'client_bundle_url' => url('/'.config('qz-tray.routes.prefix', 'qz').'/client-bundle'),
+            'guide' => 'docs/zero-prompt.md',
         ];
     }
 
-    public function health(): \Illuminate\Http\JsonResponse
+    public function health(): JsonResponse
     {
         return response()->json([
-            'status'    => 'healthy',
-            'service'   => 'qz-tray',
+            'status' => 'healthy',
+            'service' => 'qz-tray',
             'timestamp' => now()->toIso8601String(),
         ]);
     }
@@ -349,16 +361,16 @@ class QzSecurityController extends Controller
     private function generateUuid(): string
     {
         if (config('qz-tray.uuid_version', 'v7') === 'v7'
-            && method_exists(\Illuminate\Support\Str::class, 'uuid7')) {
+            && method_exists(Str::class, 'uuid7')) {
             try {
-                return (string) \Illuminate\Support\Str::uuid7();
+                return (string) Str::uuid7();
             } catch (\Throwable $e) {
                 // Fall through to v4 below — e.g. an incompatible
                 // ramsey/uuid version present despite the method existing.
             }
         }
 
-        return (string) \Illuminate\Support\Str::uuid();
+        return (string) Str::uuid();
     }
 
     /**
@@ -446,13 +458,13 @@ class QzSecurityController extends Controller
         return $identities;
     }
 
-    public function setPrinter(Request $request): \Illuminate\Http\JsonResponse
+    public function setPrinter(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'printer'    => 'required|string|max:255',
-            'path'       => 'required|string|max:500',
-            'device_id'  => 'nullable|uuid',
-            'tenant_id'  => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
+            'printer' => 'required|string|max:255',
+            'path' => 'required|string|max:500',
+            'device_id' => 'nullable|uuid',
+            'tenant_id' => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
                 if (! $this->isValidTenantId($value)) {
                     $fail("The {$attribute} must be either an integer id or a UUID.");
                 }
@@ -467,7 +479,7 @@ class QzSecurityController extends Controller
         // AUDIT H4: print()/jobs()/cancelJob() degraded gracefully when the
         // package migrations had not been run, but setPrinter() hit the
         // missing table directly and surfaced a raw QueryException 500.
-        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_printer_preferences')) {
+        if (! Schema::hasTable('qz_printer_preferences')) {
             return response()->json([
                 'success' => false,
                 'message' => 'qz_printer_preferences table not migrated. Run: php artisan migrate',
@@ -475,7 +487,7 @@ class QzSecurityController extends Controller
         }
 
         $identities = $this->resolveIdentities($request);
-        $tenantId   = $this->resolveTenantId($request);
+        $tenantId = $this->resolveTenantId($request);
 
         if (empty($identities)) {
             return response()->json([
@@ -487,28 +499,28 @@ class QzSecurityController extends Controller
         foreach ($identities as $type => $value) {
             \DB::table('qz_printer_preferences')->updateOrInsert(
                 [
-                    'tenant_id'      => $tenantId,
-                    'identity_type'  => $type,
+                    'tenant_id' => $tenantId,
+                    'identity_type' => $type,
                     'identity_value' => $value,
-                    'path'           => $validated['path'],
+                    'path' => $validated['path'],
                 ],
                 ['printer_name' => $validated['printer'], 'updated_at' => now(), 'created_at' => now()]
             );
         }
 
         return response()->json([
-            'success'    => true,
-            'printer'    => $validated['printer'],
-            'path'       => $validated['path'],
-            'scoped_to'  => array_keys($identities),
-            'tenant_id'  => $tenantId,
+            'success' => true,
+            'printer' => $validated['printer'],
+            'path' => $validated['path'],
+            'scoped_to' => array_keys($identities),
+            'tenant_id' => $tenantId,
         ]);
     }
 
-    public function getPrinter(Request $request, string $path): \Illuminate\Http\JsonResponse
+    public function getPrinter(Request $request, string $path): JsonResponse
     {
         // AUDIT H4: consistent graceful degradation (see setPrinter()).
-        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_printer_preferences')) {
+        if (! Schema::hasTable('qz_printer_preferences')) {
             return response()->json([
                 'success' => false,
                 'message' => 'qz_printer_preferences table not migrated. Run: php artisan migrate',
@@ -516,8 +528,8 @@ class QzSecurityController extends Controller
         }
 
         $identities = $this->resolveIdentities($request);
-        $tenantId   = $this->resolveTenantId($request);
-        $priority   = config('qz-tray.identity_priority', ['device', 'user', 'session']);
+        $tenantId = $this->resolveTenantId($request);
+        $priority = config('qz-tray.identity_priority', ['device', 'user', 'session']);
 
         $printer = null;
         $matchedType = null;
@@ -535,17 +547,17 @@ class QzSecurityController extends Controller
                 ->first();
 
             if ($row) {
-                $printer     = $row->printer_name;
+                $printer = $row->printer_name;
                 $matchedType = $type;
                 break;
             }
         }
 
         return response()->json([
-            'success'    => true,
-            'printer'    => $printer ?? config('qz-tray.default_printer'),
-            'path'       => $path,
-            'scoped_to'  => $matchedType, // null when falling back to the global default
+            'success' => true,
+            'printer' => $printer ?? config('qz-tray.default_printer'),
+            'path' => $path,
+            'scoped_to' => $matchedType, // null when falling back to the global default
         ]);
     }
 
@@ -556,7 +568,7 @@ class QzSecurityController extends Controller
      * This variant carries the same value as ?path= which no web server
      * mangles. Same behavior, same response shape.
      */
-    public function getPrinterByQuery(Request $request): \Illuminate\Http\JsonResponse
+    public function getPrinterByQuery(Request $request): JsonResponse
     {
         $path = (string) $request->query('path', '');
 
@@ -567,10 +579,10 @@ class QzSecurityController extends Controller
         return $this->getPrinter($request, $path);
     }
 
-    public function clearCache(Request $request): \Illuminate\Http\JsonResponse
+    public function clearCache(Request $request): JsonResponse
     {
         // AUDIT H4: consistent graceful degradation (see setPrinter()).
-        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_printer_preferences')) {
+        if (! Schema::hasTable('qz_printer_preferences')) {
             return response()->json([
                 'success' => false,
                 'message' => 'qz_printer_preferences table not migrated. Run: php artisan migrate',
@@ -595,7 +607,9 @@ class QzSecurityController extends Controller
                 ->where('identity_value', $value);
 
             if ($explicitTenant !== null) {
-                if ($tid = $this->resolveTenantId($request)) { $query->where('tenant_id', $tid); }
+                if ($tid = $this->resolveTenantId($request)) {
+                    $query->where('tenant_id', $tid);
+                }
             }
 
             $deleted += $query->delete();
@@ -614,41 +628,41 @@ class QzSecurityController extends Controller
         Cache::forget('qz.printer_keys');
 
         return response()->json([
-            'success'   => true,
-            'message'   => "Printer cache cleared ({$deleted} preference rows removed)",
+            'success' => true,
+            'message' => "Printer cache cleared ({$deleted} preference rows removed)",
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    public function printers(): \Illuminate\Http\JsonResponse
+    public function printers(): JsonResponse
     {
         return response()->json([
             'success' => true,
             'message' => 'Use QZ Tray WebSocket connection to get printers',
-            'note'    => 'This endpoint is UI / status only',
+            'note' => 'This endpoint is UI / status only',
         ]);
     }
 
-    public function print(Request $request): \Illuminate\Http\JsonResponse
+    public function print(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'printer'    => 'required|string|max:255',
-            'type'       => 'required|in:raw,pdf,html,zpl,escpos',
-            'data'       => 'required_without:url|nullable|string',
-            'url'        => 'required_without:data|nullable|string|max:2048',
-            'copies'     => 'nullable|integer|min:1|max:999',
-            'document'   => 'nullable|string|max:255',
-            'device_id'  => 'nullable|uuid',
-            'job_id'     => 'nullable|uuid',
+            'printer' => 'required|string|max:255',
+            'type' => 'required|in:raw,pdf,html,zpl,escpos',
+            'data' => 'required_without:url|nullable|string',
+            'url' => 'required_without:data|nullable|string|max:2048',
+            'copies' => 'nullable|integer|min:1|max:999',
+            'document' => 'nullable|string|max:255',
+            'device_id' => 'nullable|uuid',
+            'job_id' => 'nullable|uuid',
             // AUDIT C2: the client can now drive the job lifecycle explicitly
             // (pending -> processing -> completed/failed) through the same
             // idempotent POST /qz/print endpoint, or via PATCH /qz/jobs/{id}.
-            'status'        => 'nullable|in:pending,processing,completed,failed,cancelled',
+            'status' => 'nullable|in:pending,processing,completed,failed,cancelled',
             'error_message' => 'nullable|string|max:1000',
-            'metadata'   => 'nullable|array',
+            'metadata' => 'nullable|array',
             // Accepted under either name: some host apps call it
             // "tenant_id", others "project_id" — same value, one column.
-            'tenant_id'  => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
+            'tenant_id' => ['nullable', 'string', 'max:64', function ($attribute, $value, $fail) {
                 if (! $this->isValidTenantId($value)) {
                     $fail("The {$attribute} must be either an integer id or a UUID.");
                 }
@@ -673,7 +687,7 @@ class QzSecurityController extends Controller
         //                 the row is inserted without one and the
         //                 database-assigned auto-increment value becomes
         //                 $jobId instead, once the insert below completes.
-        $usesUuid   = config('qz-tray.id_type', 'uuid') === 'uuid';
+        $usesUuid = config('qz-tray.id_type', 'uuid') === 'uuid';
         $clientJobId = $request->input('job_id');
         $jobId = ($usesUuid && $clientJobId)
             ? $clientJobId
@@ -682,7 +696,7 @@ class QzSecurityController extends Controller
             // pre-insert placeholder in bigint mode, for the
             // (db_logged === false) response path below.
             : $this->generateUuid();
-        $type  = $request->input('type');
+        $type = $request->input('type');
 
         // AUDIT H5: the X-Device-Id header used to be written straight into
         // the uuid-typed device_id column without any validation — any
@@ -721,23 +735,23 @@ class QzSecurityController extends Controller
         // new row is created. The additive client_job_id column (v1.2.1
         // migration) gives bigint installs the same idempotency.
         $dbLogged = false;
-        $status   = $validated['status'] ?? null;
+        $status = $validated['status'] ?? null;
 
-        if (\Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+        if (Schema::hasTable('qz_print_jobs')) {
             try {
                 $user = $request->user();
                 $base = [
-                    'tenant_id'     => $tenantId,
-                    'user_id'       => $user ? (string) $user->getAuthIdentifier() : null,
-                    'user_type'     => $user ? get_class($user) : null,
-                    'device_id'     => $deviceId,
-                    'printer_name'  => $request->input('printer'),
-                    'document_url'  => $request->input('url', ''),
+                    'tenant_id' => $tenantId,
+                    'user_id' => $user ? (string) $user->getAuthIdentifier() : null,
+                    'user_type' => $user ? get_class($user) : null,
+                    'device_id' => $deviceId,
+                    'printer_name' => $request->input('printer'),
+                    'document_url' => $request->input('url', ''),
                     'document_type' => $type,
-                    'copies'        => (int) $request->input('copies', 1),
-                    'metadata'      => json_encode($request->input('metadata', [])),
+                    'copies' => (int) $request->input('copies', 1),
+                    'metadata' => json_encode($request->input('metadata', [])),
                     'error_message' => $validated['error_message'] ?? null,
-                    'updated_at'    => now(),
+                    'updated_at' => now(),
                 ];
 
                 $existing = null;
@@ -779,11 +793,11 @@ class QzSecurityController extends Controller
                 }
                 $dbLogged = true;
             } catch (\Throwable $e) {
-                Log::warning('[QZ Tray] Could not persist print job to DB: ' . $e->getMessage());
+                Log::warning('[QZ Tray] Could not persist print job to DB: '.$e->getMessage());
             }
         }
 
-        event(new \Bitdreamit\QzTray\Events\PrintJobLogged(
+        event(new PrintJobLogged(
             $jobId,
             $request->input('printer'),
             $type,
@@ -794,19 +808,19 @@ class QzSecurityController extends Controller
         if (config('qz-tray.logging.enabled', false)) {
             Log::channel(config('qz-tray.logging.channel', 'stack'))
                 ->info('[QZ Tray] Print job received', [
-                    'job_id'  => $jobId,
+                    'job_id' => $jobId,
                     'printer' => $request->input('printer'),
-                    'type'    => $type,
-                    'db'      => $dbLogged,
+                    'type' => $type,
+                    'db' => $dbLogged,
                 ]);
         }
 
         return response()->json([
-            'success'   => true,
-            'message'   => 'Print job accepted',
-            'job_id'    => $jobId,
-            'printer'   => $request->input('printer'),
-            'type'      => $type,
+            'success' => true,
+            'message' => 'Print job accepted',
+            'job_id' => $jobId,
+            'printer' => $request->input('printer'),
+            'type' => $type,
             'db_logged' => $dbLogged,
             'timestamp' => now()->toIso8601String(),
         ]);
@@ -820,19 +834,19 @@ class QzSecurityController extends Controller
      * identical to cancelJob() — only the submitting user/device may mutate
      * a job, and foreign ids return 404 without leaking existence.
      */
-    public function updateJobStatus(Request $request, string $id): \Illuminate\Http\JsonResponse
+    public function updateJobStatus(Request $request, string $id): JsonResponse
     {
         $validated = $request->validate([
-            'status'        => 'required|in:pending,processing,completed,failed,cancelled',
+            'status' => 'required|in:pending,processing,completed,failed,cancelled',
             'error_message' => 'nullable|string|max:1000',
-            'device_id'     => 'nullable|uuid',
+            'device_id' => 'nullable|uuid',
         ]);
 
-        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+        if (! Schema::hasTable('qz_print_jobs')) {
             return response()->json(['success' => false, 'message' => 'qz_print_jobs table not migrated'], 404);
         }
 
-        $user     = $request->user();
+        $user = $request->user();
         $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
 
         if ($deviceId !== null
@@ -859,32 +873,32 @@ class QzSecurityController extends Controller
                 }
             })
             ->update([
-                'status'        => $validated['status'],
+                'status' => $validated['status'],
                 'error_message' => $validated['error_message'] ?? null,
-                'processed_at'  => in_array($validated['status'], ['completed', 'failed', 'cancelled'], true)
+                'processed_at' => in_array($validated['status'], ['completed', 'failed', 'cancelled'], true)
                     ? now()
                     : null,
-                'updated_at'    => now(),
+                'updated_at' => now(),
             ]);
 
         if (! $updated) {
             return response()->json(['success' => false, 'message' => "Print job {$id} not found or not owned by you"], 404);
         }
 
-        event(new \Bitdreamit\QzTray\Events\PrintJobStatusUpdated($id, $validated['status']));
+        event(new PrintJobStatusUpdated($id, $validated['status']));
 
         return response()->json([
             'success' => true,
             'message' => "Print job {$id} marked as {$validated['status']}",
-            'job_id'  => $id,
-            'status'  => $validated['status'],
+            'job_id' => $id,
+            'status' => $validated['status'],
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    public function jobs(Request $request): \Illuminate\Http\JsonResponse
+    public function jobs(Request $request): JsonResponse
     {
-        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+        if (! Schema::hasTable('qz_print_jobs')) {
             return response()->json(['success' => true, 'jobs' => [], 'message' => 'qz_print_jobs table not migrated']);
         }
 
@@ -905,7 +919,7 @@ class QzSecurityController extends Controller
         // Scope the queue to the requesting identity so PC-1's queue view
         // never shows PC-2's jobs (or vice versa) when several workstations
         // share the same Laravel session/auth guard.
-        $user     = $request->user();
+        $user = $request->user();
         $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
         if ($user) {
             $query->where('user_id', (string) $user->getAuthIdentifier())->where('user_type', get_class($user));
@@ -927,9 +941,9 @@ class QzSecurityController extends Controller
         return response()->json(['success' => true, 'jobs' => $jobs]);
     }
 
-    public function cancelJob(Request $request, string $id): \Illuminate\Http\JsonResponse
+    public function cancelJob(Request $request, string $id): JsonResponse
     {
-        if (! \Illuminate\Support\Facades\Schema::hasTable('qz_print_jobs')) {
+        if (! Schema::hasTable('qz_print_jobs')) {
             return response()->json(['success' => false, 'message' => 'qz_print_jobs table not migrated'], 404);
         }
 
@@ -939,7 +953,7 @@ class QzSecurityController extends Controller
         // (same scoping as jobs()): matching user (id+type pair) or the
         // device UUID. A job owned by somebody else returns 404 without
         // leaking its existence.
-        $user     = $request->user();
+        $user = $request->user();
         $deviceId = $request->header('X-Device-Id') ?? $request->input('device_id');
 
         if ($deviceId !== null
@@ -980,30 +994,30 @@ class QzSecurityController extends Controller
         }
 
         \DB::table('qz_print_jobs')->where('id', $id)->update([
-            'status'       => 'cancelled',
+            'status' => 'cancelled',
             'processed_at' => now(),
-            'updated_at'   => now(),
+            'updated_at' => now(),
         ]);
 
-        event(new \Bitdreamit\QzTray\Events\PrintJobStatusUpdated($id, 'cancelled'));
+        event(new PrintJobStatusUpdated($id, 'cancelled'));
 
         return response()->json([
             'success' => true,
             'message' => "Print job {$id} cancelled",
-            'job_id'  => $id,
+            'job_id' => $id,
         ]);
     }
 
-    public function installer(string $os): \Symfony\Component\HttpFoundation\BinaryFileResponse|\Illuminate\Http\JsonResponse
+    public function installer(string $os): BinaryFileResponse|JsonResponse
     {
-        $os      = strtolower($os);
+        $os = strtolower($os);
         $allowed = ['windows', 'linux', 'macos'];
 
         if (! in_array($os, $allowed)) {
             return response()->json(['success' => false, 'message' => 'Invalid OS specified'], 400);
         }
 
-        $fileName   = config("qz-tray.installers.{$os}");
+        $fileName = config("qz-tray.installers.{$os}");
         $publicPath = public_path("vendor/qz-tray/installers/{$fileName}");
 
         // AUDIT H1: the repo previously tracked 0-BYTE placeholder installer
@@ -1013,22 +1027,22 @@ class QzSecurityController extends Controller
         if ($fileName && is_file($publicPath) && filesize($publicPath) > 0) {
             $mime = [
                 'windows' => 'application/vnd.microsoft.portable-executable',
-                'linux'   => 'application/vnd.debian.binary-package',
-                'macos'   => 'application/vnd.apple.installer+xml',
+                'linux' => 'application/vnd.debian.binary-package',
+                'macos' => 'application/vnd.apple.installer+xml',
             ][$os] ?? 'application/octet-stream';
 
             return response()->download($publicPath, $fileName, [
-                'Content-Type'        => $mime,
-                'Content-Disposition' => 'attachment; filename="' . $fileName . '"',
+                'Content-Type' => $mime,
+                'Content-Disposition' => 'attachment; filename="'.$fileName.'"',
             ]);
         }
 
         // Fallback: return JSON pointing to the official download page.
         return response()->json([
-            'success'      => true,
-            'message'      => "Installer info for {$os}",
+            'success' => true,
+            'message' => "Installer info for {$os}",
             'download_url' => 'https://qz.io/download',
-            'note'         => 'Bundled installer not published. Run: php artisan vendor:publish --tag=qz-installers',
+            'note' => 'Bundled installer not published. Run: php artisan vendor:publish --tag=qz-installers',
         ]);
     }
 
@@ -1050,51 +1064,51 @@ class QzSecurityController extends Controller
         </head><body>
             <h1>QZ Tray Test Document</h1>
             <p>This is a test document generated by Laravel QZ Tray.</p>
-            <p>Generated: ' . now()->toDateTimeString() . '</p>
+            <p>Generated: '.now()->toDateTimeString().'</p>
         </body></html>';
 
-        if (class_exists(\Barryvdh\DomPDF\Facade\Pdf::class)) {
-            return \Barryvdh\DomPDF\Facade\Pdf::loadHTML($html)->stream('qz-test.pdf');
+        if (class_exists(Pdf::class)) {
+            return Pdf::loadHTML($html)->stream('qz-test.pdf');
         }
 
         // Fallback: return HTML so the browser can render / print it
         return response($html, 200, ['Content-Type' => 'text/html']);
     }
 
-    public function testConnection(): \Illuminate\Http\JsonResponse
+    public function testConnection(): JsonResponse
     {
         $prefix = config('qz-tray.routes.prefix', 'qz');
 
         return response()->json([
-            'success'   => true,
-            'message'   => 'QZ Tray API is working',
+            'success' => true,
+            'message' => 'QZ Tray API is working',
             'endpoints' => [
                 'certificate' => "/{$prefix}/certificate",
-                'sign'        => "/{$prefix}/sign",
-                'status'      => "/{$prefix}/status",
-                'health'      => "/{$prefix}/health",
+                'sign' => "/{$prefix}/sign",
+                'status' => "/{$prefix}/status",
+                'health' => "/{$prefix}/health",
             ],
             'timestamp' => now()->toIso8601String(),
         ]);
     }
 
-    public function setup(): \Illuminate\Http\JsonResponse
+    public function setup(): JsonResponse
     {
         $certPath = config('qz-tray.cert_path');
-        $keyPath  = config('qz-tray.key_path');
-        $prefix   = config('qz-tray.routes.prefix', 'qz');
+        $keyPath = config('qz-tray.key_path');
+        $prefix = config('qz-tray.routes.prefix', 'qz');
 
         return response()->json([
-            'success'     => true,
+            'success' => true,
             'certificate' => ($certPath && file_exists($certPath)) ? 'exists' : 'missing',
-            'private_key' => ($keyPath  && file_exists($keyPath))  ? 'exists' : 'missing',
-            'trust'       => $this->trustSummary(null),
-            'endpoints'   => [
+            'private_key' => ($keyPath && file_exists($keyPath)) ? 'exists' : 'missing',
+            'trust' => $this->trustSummary(null),
+            'endpoints' => [
                 'certificate' => url("/{$prefix}/certificate"),
-                'sign'        => url("/{$prefix}/sign"),
-                'status'      => url("/{$prefix}/status"),
+                'sign' => url("/{$prefix}/sign"),
+                'status' => url("/{$prefix}/status"),
                 'ca_certificate' => url("/{$prefix}/ca-certificate"),
-                'client_bundle'  => url("/{$prefix}/client-bundle"),
+                'client_bundle' => url("/{$prefix}/client-bundle"),
             ],
         ]);
     }
@@ -1103,7 +1117,7 @@ class QzSecurityController extends Controller
      * Generate certificate via HTTP (disabled by default for security).
      * Enable with: 'allow_public_cert_generate' => true in config.
      */
-    public function generateCertificatePublic(): \Illuminate\Http\JsonResponse
+    public function generateCertificatePublic(): JsonResponse
     {
         if (! config('qz-tray.allow_public_cert_generate', false)) {
             return response()->json([
@@ -1116,19 +1130,19 @@ class QzSecurityController extends Controller
             return response()->json(['success' => false, 'message' => 'OpenSSL extension not available'], 500);
         }
 
-        $certPath   = config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt'));
-        $keyPath    = config('qz-tray.key_path',  storage_path('qz/private-key.pem'));
+        $certPath = config('qz-tray.cert_path', storage_path('qz/digital-certificate.txt'));
+        $keyPath = config('qz-tray.key_path', storage_path('qz/private-key.pem'));
         $certConfig = config('qz-tray.certificate', []);
 
         $opensslConfig = [
-            'digest_alg'       => $certConfig['algorithm'] ?? 'sha256',
-            'private_key_bits' => $certConfig['key_bits']  ?? 2048,
+            'digest_alg' => $certConfig['algorithm'] ?? 'sha256',
+            'private_key_bits' => $certConfig['key_bits'] ?? 2048,
             'private_key_type' => OPENSSL_KEYTYPE_RSA,
         ];
         $subject = $certConfig['subject'] ?? [
-            'countryName'      => 'US',
+            'countryName' => 'US',
             'organizationName' => 'QZ Tray',
-            'commonName'       => 'QZ Tray Certificate',
+            'commonName' => 'QZ Tray Certificate',
         ];
 
         $privateKey = openssl_pkey_new($opensslConfig);
@@ -1155,13 +1169,13 @@ class QzSecurityController extends Controller
         }
 
         file_put_contents($certPath, $certificatePem);
-        file_put_contents($keyPath,  $privateKeyPem);
+        file_put_contents($keyPath, $privateKeyPem);
         chmod($certPath, 0644);
-        chmod($keyPath,  0600);
+        chmod($keyPath, 0600);
 
         return response()->json([
-            'success'   => true,
-            'message'   => 'Certificate generated successfully',
+            'success' => true,
+            'message' => 'Certificate generated successfully',
             'timestamp' => now()->toIso8601String(),
         ]);
     }
@@ -1169,7 +1183,7 @@ class QzSecurityController extends Controller
     /**
      * Test-sign endpoint — verifies signing pipeline end-to-end.
      */
-    public function testSign(): \Illuminate\Http\JsonResponse
+    public function testSign(): JsonResponse
     {
         $keyPath = config('qz-tray.key_path');
 
@@ -1182,13 +1196,13 @@ class QzSecurityController extends Controller
             return response()->json(['success' => false, 'message' => 'Invalid private key'], 500);
         }
 
-        $testData  = 'qz_test_' . time();
+        $testData = 'qz_test_'.time();
         $signature = null;
-        $ok        = openssl_sign($testData, $signature, $privateKey, OPENSSL_ALGO_SHA512);
+        $ok = openssl_sign($testData, $signature, $privateKey, OPENSSL_ALGO_SHA512);
 
         return response()->json([
-            'success'   => $ok,
-            'message'   => $ok ? 'Signing works correctly' : 'Signing failed',
+            'success' => $ok,
+            'message' => $ok ? 'Signing works correctly' : 'Signing failed',
             'algorithm' => 'SHA512',
             'timestamp' => now()->toIso8601String(),
         ]);
