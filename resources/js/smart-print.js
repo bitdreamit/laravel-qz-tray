@@ -712,6 +712,27 @@ window.SmartPrint = (() => {
             ?? (window.QZ_CONFIG && (window.QZ_CONFIG.tenantId ?? window.QZ_CONFIG.projectId))
             ?? undefined;
 
+        // v1.5.0: the server caps url at 2048 chars and error_message at 1000
+        // (QzSecurityController::print validation). A URL that carries a PDF
+        // payload (blade passing base64 as the receipt id) or any mega URL
+        // must not 422 the logger — truncate oversized fields and count the
+        // skipped payloads in metadata instead.
+        const MAX_LOG_URL   = 2000;
+        const MAX_LOG_ERROR = 900;
+        const MAX_LOG_DATA  = 65536;   // keep well under a TEXT column limit
+        let logUrl = job.url || undefined;
+        if (typeof logUrl === 'string' && logUrl.length > MAX_LOG_URL) {
+            logUrl = logUrl.slice(0, MAX_LOG_URL) + '…[truncated:' + job.url.length + ' chars]';
+        }
+        const rawLogData = job.url ? undefined : (job.data || undefined);
+        const logData = (typeof rawLogData === 'string' && rawLogData.length > MAX_LOG_DATA)
+            ? undefined : rawLogData;
+        const logError = (typeof errorMessage === 'string' && errorMessage.length > MAX_LOG_ERROR)
+            ? errorMessage.slice(0, MAX_LOG_ERROR) : (errorMessage || undefined);
+        const meta = { status: status || 'completed' };
+        if (job.url && logUrl !== job.url) meta.url_truncated = true;
+        if (rawLogData !== undefined && logData === undefined) meta.data_bytes = rawLogData.length;
+
         fetch(endpoint('print'), {
             method: 'POST',
             cache:  'no-store',
@@ -726,14 +747,14 @@ window.SmartPrint = (() => {
                 job_id:    job.id,
                 printer,
                 type:      job.type,
-                url:       job.url || undefined,
-                data:      job.url ? undefined : (job.data || undefined),
+                url:       logUrl,
+                data:      logData,
                 copies:    job.copies,
                 device_id: getDeviceId(),
                 tenant_id: tenantId !== undefined ? String(tenantId) : undefined,
                 status,
-                error_message: errorMessage || undefined,
-                metadata:  { status: status || 'completed' },
+                error_message: logError,
+                metadata:  meta,
             }),
         }).then(r => {
             // v1.5.0: 419/401 = session/token dead (long-lived tab, logged out
@@ -1803,6 +1824,23 @@ window.SmartPrint = (() => {
         return /\.(pdf|png|jpe?g|gif|webp|svg|bmp)([?#]|$)/i.test(String(url));
     }
 
+    // v1.5.0: detect a base64 PDF accidentally used as (part of) a URL —
+    // the "pass mPDF's base64 output as the route parameter" bug seen in
+    // receipt blades: printUrl('/lab/receipt/edit/JVBERi0xLjQ…'). Those URLs
+    // are hundreds of KB, die with HTTP 414 (URI Too Long) at the server, and
+    // QZ Tray can never download them. The bytes are already IN the page, so
+    // they can be printed directly instead of fetched. 'JVBERi' is base64 for
+    // '%PDF-'. Tolerates %-encoded +/= so URI-encoded paths match as well.
+    function embeddedPdfInUrl(s) {
+        if (typeof s !== 'string' || s.length < 600) return null;
+        const probe = String(s)
+            .replace(/%2B/gi, '+')
+            .replace(/%2F/gi, '/')
+            .replace(/%3D/gi, '=');
+        const m = probe.match(/(?:^|\/|[:=])(JVBERi[A-Za-z0-9+\/=]{500,})/);
+        return m ? m[1] : null;
+    }
+
     // Reduce ONE input (already resolved from functions/arrays) to a spec:
     // { type, url?, data?, base64?, element?, filename?, ...per-input opts }.
     // Accepted shapes: url string | css selector | HTMLElement |
@@ -1822,6 +1860,15 @@ window.SmartPrint = (() => {
                 if (m) return { type: 'image', base64: raw, imageMime: m[1].toLowerCase() };
                 // any other data: URI (svg text, unknown binary…) -> <img> wrapper
                 return { type: 'html', data: '<img src="' + s + '" style="max-width:100%">' };
+            }
+            // v1.5.0: rescue a PDF payload that was glued INTO a URL
+            // (e.g. '/lab/receipt/edit/JVBERi0xLjQ…') — print the bytes
+            // directly instead of fetching the oversized URL.
+            const embedded = embeddedPdfInUrl(s);
+            if (embedded) {
+                console.warn('[SmartPrint] URL carried an embedded PDF payload ('
+                    + Math.round(embedded.length / 1024) + ' KB base64) — printing the bytes directly.');
+                return { type: 'pdf', base64: embedded };
             }
             // Long base64-looking payload (no scheme, no selector chars)
             if (s.length >= 32 && /^[A-Za-z0-9+/]+={0,2}$/.test(s)) {
@@ -1857,6 +1904,18 @@ window.SmartPrint = (() => {
             if (input.url !== undefined) {
                 spec.url = input.url;
                 if (!spec.type) spec.type = sniffType(input.url);
+                // v1.5.0: same embedded-PDF rescue for the object form
+                // { url: '/lab/receipt/edit/JVBERi…' }
+                if (!spec.data && !spec.base64 && !spec.element) {
+                    const embedded = embeddedPdfInUrl(spec.url);
+                    if (embedded) {
+                        console.warn('[SmartPrint] URL carried an embedded PDF payload ('
+                            + Math.round(embedded.length / 1024) + ' KB base64) — printing the bytes directly.');
+                        spec.base64 = embedded;
+                        spec.type   = 'pdf';
+                        spec.url    = undefined;
+                    }
+                }
             }
             if (input.html !== undefined) { spec.type = 'html'; spec.data = input.html; }
             if (input.pdf !== undefined) {
@@ -2138,7 +2197,18 @@ window.SmartPrint = (() => {
             const spec0 = resolveOne(raw);
             const isUrlDoc = !!spec0 && !!spec0.url && !spec0.data && !spec0.base64 && !spec0.element
                 && (spec0.type === 'pdf' || spec0.type === 'image' || spec0.type === 'html');
-            if (!isUrlDoc) return enqueue(raw);
+            if (!isUrlDoc) {
+                // v1.5.0: if resolution CHANGED the input shape (embedded-PDF
+                // in-URL rescue), print the resolved spec — the raw object
+                // still carries the giant URL QZ would choke on (HTTP 414).
+                if (spec0 && spec0.base64 && !raw.base64 && !raw.data) {
+                    const job = specToJob(spec0, {}, opts);
+                    if (raw.onComplete) job.onComplete = raw.onComplete;
+                    if (raw.onError)    job.onError    = raw.onError;
+                    return enqueue(job);
+                }
+                return enqueue(raw);
+            }
 
             return hydrateSpec(spec0, spec0.type, opts).then(spec => {
                 if (spec.hydrate && spec.hydrate.misdirected) {

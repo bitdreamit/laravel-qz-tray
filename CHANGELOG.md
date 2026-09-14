@@ -152,6 +152,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   `job-failed`), printer/copies preserved. Data-carrying jobs
   (`zpl`/`escpos`/`raw`/base64) are untouched, and a non-OK fetch still
   degrades to the legacy URL behavior.
+- **Embedded-PDF-in-URL rescue (`HTTP 414 URI Too Long`).** Receipt blades
+  that pass the mPDF base64 output as the route parameter produced URLs like
+  `/lab/receipt/edit/JVBERi0xLjQ…` (hundreds of KB). QZ Tray downloading
+  that URL dies with `Server returned HTTP response code: 414` (or a
+  timeout / `Error writing to server`). SmartPrint now detects a `%PDF-`
+  payload (`JVBERi…`) embedded in any URL path/query — string **and**
+  object form — and prints those bytes directly instead of fetching the
+  oversized URL. `printReceipt()` in `lab-receipt.js` gained the same
+  guard one level up, with a blob-URL iframe fallback when smart-print.js
+  is absent.
+- **Job logger no longer 422s on oversized payloads.** `POST /qz/print`
+  validation caps `url` at 2048 chars and `error_message` at 1000 — the
+  embedded-PDF URL above exceeded both, so every print attempt also
+  sprayed `422 (Unprocessable Content)` into the console. `logPrintJob()`
+  now truncates `url` (2000 + `[truncated:N chars]` marker +
+  `metadata.url_truncated`), truncates `error_message` (900) and drops
+  base64 `data` bodies over 64 KB, recording only `metadata.data_bytes`.
 
 ## [1.4.2] — 2026-09-13
 
