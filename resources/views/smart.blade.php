@@ -319,8 +319,21 @@ function doPdfPrint() {
 
     if (!url) { log('Please enter a PDF URL', 'error'); return; }
 
-    log('Queuing PDF print: ' + url);
-    var job = { url: url, type: 'pdf', printer: printer, copies: copies, profile: profile };
+    // v1.5.4: the field also accepts an inline PDF payload (raw base64 or a
+    // data:application/pdf URI) — print those bytes directly instead of
+    // building an oversized URL that servers answer with HTTP 414.
+    var job;
+    if (/^data:application\/pdf;base64,/i.test(url)) {
+        job = { data: url.replace(/^data:application\/pdf;base64,/i, ''), type: 'pdf', printer: printer, copies: copies, profile: profile };
+        log('Detected data: URI — printing the PDF bytes directly (' + Math.round(job.data.length / 1024) + ' KB)');
+    } else if (/^JVBERi[A-Za-z0-9+\/=\s]{100,}$/.test(url)) {
+        job = { data: url.replace(/\s+/g, ''), type: 'pdf', printer: printer, copies: copies, profile: profile };
+        log('Detected raw base64 PDF — printing the bytes directly (' + Math.round(job.data.length / 1024) + ' KB)');
+    } else {
+        job = { url: url, type: 'pdf', printer: printer, copies: copies, profile: profile };
+        log('Queuing PDF print: ' + url);
+    }
+
     if (delay > 0) {
         setTimeout(function() { SmartPrint.print(job); }, delay);
     } else {

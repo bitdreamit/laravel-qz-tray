@@ -13,7 +13,7 @@ class QzTrayServiceProvider extends ServiceProvider
      * agree with composer.json (the previous hardcoded '1.0.0' in the
      * controller drifted from the real version). Bump on every release.
      */
-    public const VERSION = '1.5.0';
+    public const VERSION = '1.5.4';
 
     public function boot(): void
     {

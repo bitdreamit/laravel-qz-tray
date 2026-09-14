@@ -717,12 +717,14 @@ window.SmartPrint = (() => {
         // payload (blade passing base64 as the receipt id) or any mega URL
         // must not 422 the logger — truncate oversized fields and count the
         // skipped payloads in metadata instead.
-        const MAX_LOG_URL   = 2000;
-        const MAX_LOG_ERROR = 900;
+        const MAX_LOG_URL   = 240;    // fits ANY server cap (smallest known: max:255)
+        const MAX_LOG_ERROR = 240;
         const MAX_LOG_DATA  = 65536;   // keep well under a TEXT column limit
         let logUrl = job.url || undefined;
         if (typeof logUrl === 'string' && logUrl.length > MAX_LOG_URL) {
-            logUrl = logUrl.slice(0, MAX_LOG_URL) + '…[truncated:' + job.url.length + ' chars]';
+            // marker included INSIDE the cap so the total stays <= MAX_LOG_URL
+            const marker = '…[truncated:' + job.url.length + ' chars]';
+            logUrl = job.url.slice(0, MAX_LOG_URL - marker.length) + marker;
         }
         const rawLogData = job.url ? undefined : (job.data || undefined);
         const logData = (typeof rawLogData === 'string' && rawLogData.length > MAX_LOG_DATA)
@@ -860,7 +862,21 @@ window.SmartPrint = (() => {
                 // the pdf payload — direct base64 printing (fetched blobs,
                 // canvas exports, already-downloaded documents) no longer
                 // needs a round-trip to a public URL.
-                payload = [{ type: 'pdf', data: job.url || job.data }];
+                // v1.5.4: LAST-LINE rescue — a URL that carries a %PDF-
+                // payload (base64 pasted as a URL, blade passing it as an id)
+                // must never reach QZ as (FILE): servers answer 414. Convert
+                // to the base64 bytes instead. Also absolutize relative URLs
+                // — QZ cannot resolve them ("could not be found").
+                let pdfRef = job.data || (job.url ? absolutizeForQZ(job.url) : undefined);
+                if (!job.data && job.url) {
+                    const embedded = embeddedPdfInUrl(job.url);
+                    if (embedded) {
+                        console.warn('[SmartPrint] print URL carried an embedded PDF payload ('
+                            + Math.round(embedded.length / 1024) + ' KB base64) — printing the bytes directly.');
+                        pdfRef = embedded;
+                    }
+                }
+                payload = [{ type: 'pdf', data: pdfRef }];
                 break;
             case 'html':
                 if (!job.data && !job.url) {
@@ -871,7 +887,7 @@ window.SmartPrint = (() => {
                     job._reject && job._reject(err);
                     return;
                 }
-                payload = [{ type: 'html', data: job.data || job.url }];
+                payload = [{ type: 'html', data: job.data || absolutizeForQZ(job.url) }];
                 break;
             case 'image':
                 // v1.5: native QZ image payload — base64 (hydrated bytes) or
@@ -886,7 +902,7 @@ window.SmartPrint = (() => {
                 }
                 payload = job.data
                     ? [{ type: 'image', format: 'base64', data: job.data }]
-                    : [{ type: 'image', data: job.url }];
+                    : [{ type: 'image', data: absolutizeForQZ(job.url) }];
                 break;
             case 'zpl':
             case 'raw':
@@ -1735,7 +1751,16 @@ window.SmartPrint = (() => {
             // page's fetch was refused. Misdirected CONTENT (a 200 OK that
             // answers text/html where a pdf/image was expected) is refused
             // further down.
-            if (!res.ok) return spec;
+            if (!res.ok) {
+                // v1.5.4: make the degrade VISIBLE — a silent !ok here sends
+                // QZ a (FILE) it must download WITHOUT the browser session,
+                // which fails confusingly ("PDF file specified could not be
+                // found" / "Cannot parse"). Surface the real status.
+                console.warn('[SmartPrint] hydration skipped: ' + spec.url
+                    + ' answered HTTP ' + res.status
+                    + ' — QZ Tray will download the URL itself (no session).');
+                return spec;
+            }
 
             const ct = String((res.headers && res.headers.get && res.headers.get('Content-Type')) || '')
                 .split(';')[0].trim().toLowerCase();
@@ -1833,12 +1858,23 @@ window.SmartPrint = (() => {
     // '%PDF-'. Tolerates %-encoded +/= so URI-encoded paths match as well.
     function embeddedPdfInUrl(s) {
         if (typeof s !== 'string' || s.length < 600) return null;
+        // v1.5.4: decode EVERY %xx escape and strip whitespace/newlines before
+        // matching — inputs pasted from error logs / MIME-wrapped sources are
+        // frequently URL-encoded or line-wrapped, which broke the old probe.
         const probe = String(s)
-            .replace(/%2B/gi, '+')
-            .replace(/%2F/gi, '/')
-            .replace(/%3D/gi, '=');
+            .replace(/%([0-9A-Fa-f]{2})/g, (m, h) => String.fromCharCode(parseInt(h, 16)))
+            .replace(/\s+/g, '');
         const m = probe.match(/(?:^|\/|[:=])(JVBERi[A-Za-z0-9+\/=]{500,})/);
         return m ? m[1] : null;
+    }
+
+    // v1.5.4: QZ Tray has NO page context — a RELATIVE (FILE) reference fails
+    // with "PDF file specified could not be found." Resolve every URL handed
+    // to QZ against the page origin (blob:/data:/absolute URLs pass through).
+    function absolutizeForQZ(u) {
+        if (typeof u !== 'string' || !u || /^(https?:|blob:|data:|file:)/i.test(u)) return u;
+        try { return new URL(u, (window.location && window.location.href) || '/').href; }
+        catch (e) { return u; }
     }
 
     // Reduce ONE input (already resolved from functions/arrays) to a spec:
@@ -2241,7 +2277,7 @@ window.SmartPrint = (() => {
         printESC: (escpos, printer) => enqueue({ data: escpos, type: 'escpos', printer, copies: 1 }),
 
         // ---- Smart Actions (v1.5) -------------------------------------
-        version: '1.5.0',
+        version: '1.5.4',
         define,                       // register named actions (+ window globals)
         run,                          // run('printLabReceipt', input, overrides)
         has:    name => !!actions[name],

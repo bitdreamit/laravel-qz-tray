@@ -152,23 +152,60 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   `job-failed`), printer/copies preserved. Data-carrying jobs
   (`zpl`/`escpos`/`raw`/base64) are untouched, and a non-OK fetch still
   degrades to the legacy URL behavior.
-- **Embedded-PDF-in-URL rescue (`HTTP 414 URI Too Long`).** Receipt blades
-  that pass the mPDF base64 output as the route parameter produced URLs like
-  `/lab/receipt/edit/JVBERi0xLjQ…` (hundreds of KB). QZ Tray downloading
-  that URL dies with `Server returned HTTP response code: 414` (or a
-  timeout / `Error writing to server`). SmartPrint now detects a `%PDF-`
-  payload (`JVBERi…`) embedded in any URL path/query — string **and**
-  object form — and prints those bytes directly instead of fetching the
-  oversized URL. `printReceipt()` in `lab-receipt.js` gained the same
-  guard one level up, with a blob-URL iframe fallback when smart-print.js
-  is absent.
+
+## [1.5.4] — 2026-09-14
+
+Version bumped to **1.5.4** to match the deployed release line (1.5.1–1.5.3
+were the earlier fix batches). Everything below ships in this release.
+
+### Fixed
+- **Embedded-PDF-in-URL rescue (`HTTP 414 URI Too Long`).** Blades that pass
+  the mPDF base64 output as the route parameter produced URLs like
+  `/lab/receipt/edit/JVBERi0xLjQ…` (hundreds of KB); pasting a base64 payload
+  into a URL field produced the same class of monster
+  (`https://…/qz/JVBERi…`). QZ Tray downloading such a URL dies with
+  `Server returned HTTP response code: 414` (or a timeout / `Error writing to
+  server`). SmartPrint now detects a `%PDF-` payload (`JVBERi…`) embedded in
+  any URL path/query — string **and** object form — and prints those bytes
+  directly instead of fetching the oversized URL, with three layers of
+  defense: input resolution, the QZ payload builder (last-line), and
+  `printReceipt()` in `lab-receipt.js`. The detector decodes **every** `%xx`
+  escape and strips whitespace/newlines first, so URL-encoded and
+  MIME-wrapped payloads are caught too.
+- **Relative URLs handed to QZ (`PDF file specified could not be found.`).**
+  When the browser-fetch hydration is skipped (non-OK response), the job
+  degraded to the original RELATIVE URL — QZ Tray has no page context and
+  cannot resolve it, failing with "PDF file specified could not be found".
+  Every URL handed to QZ (pdf/html/image payloads) is now absolutized
+  against the page origin (`blob:`/`data:`/absolute URLs pass through), so
+  QZ can actually download it (public routes) or fail with the real error.
+- **Hydration failures are now announced.** A silently skipped hydration
+  (401/403/404/419/500 on the document fetch) made QZ's own download fail
+  with a confusing message. It now warns once per job with the real HTTP
+  status: `[SmartPrint] hydration skipped: <url> answered HTTP <status> —
+  QZ Tray will download the URL itself (no session).`
 - **Job logger no longer 422s on oversized payloads.** `POST /qz/print`
-  validation caps `url` at 2048 chars and `error_message` at 1000 — the
-  embedded-PDF URL above exceeded both, so every print attempt also
-  sprayed `422 (Unprocessable Content)` into the console. `logPrintJob()`
-  now truncates `url` (2000 + `[truncated:N chars]` marker +
-  `metadata.url_truncated`), truncates `error_message` (900) and drops
+  validation caps `url` and `error_message` (newest controller: 2048/1000 —
+  older deployments: 255/255), and the embedded-PDF URL above exceeded all
+  of them, so every print attempt also sprayed `422 (Unprocessable
+  Content)` into the console. `logPrintJob()` now truncates `url` and
+  `error_message` to 240 chars **including** the `[truncated:N chars]`
+  marker (fits the strictest cap), sets `metadata.url_truncated`, and drops
   base64 `data` bodies over 64 KB, recording only `metadata.data_bytes`.
+- **Test console (`smart.blade.php`) accepts inline PDF payloads.** The PDF
+  URL field now detects a raw base64 payload or a `data:application/pdf`
+  URI and prints the bytes directly instead of building an oversized URL.
+- **`printReceipt()` accepts the receipt PDF URL itself.** Blades can pass
+  the `receiptPdf` route (`{{ route('lab.receipt.pdf', [$id]) }}` or
+  `/lab/receipt/pdf/{id}/{format}`) as the first argument — it is printed
+  as-is through the hydration engine (optionally carrying the
+  `client`/`lab`/`office`/`duplicate` copy flag as a query parameter)
+  instead of being glued into `lab/receipt/pdf-receipt/<url>`, which 404s.
+  `printAllCopies()` and `printWorkList()` honor the same convention.
+  Session-protected mPDF `->stream()` routes print because the bytes are
+  fetched by the browser (with the session cookie) and handed to QZ —
+  QZ Tray alone cannot download them (no session → login HTML →
+  "Cannot parse … as a PDF file").
 
 ## [1.4.2] — 2026-09-13
 
