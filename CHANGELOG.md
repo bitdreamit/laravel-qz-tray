@@ -113,6 +113,46 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - New example: `resources/js/sample/smart-actions.lab.example.js` (lab /
   clinic receipt + worklist + label starter, copy-paste ready).
 
+### Fixed
+- **"Failed to get certificate: undefined" + blind SmartPrint on legacy
+  app.js pages.** Bundles that ship their own QZ bootstrap open the
+  websocket during their own evaluation — before `DOMContentLoaded`, so
+  before `init()`/`connectQZ()` ever ran. QZ Tray's first challenge then
+  found NO certificate promise (`callCert()` rejects bare → the warning),
+  and `connectQZ()` early-returned on the already-active socket without
+  discovering printers, so `SmartPrint.getPrinters()` stayed `[]` and the
+  `'connected'` event never fired — even though `qz.printers.find()`
+  clearly worked. Three-part fix in `smart-print.js`:
+  1. certificate/sign resolvers are armed **immediately at library load**
+     (and re-armed before any custom-opts native connect), so no handshake
+     can hit an unregistered promise;
+  2. the resolver never rejects with a bare `undefined` — real fetch
+     errors surface with their actual message;
+  3. **connection adoption**: an active-but-unowned socket is adopted on
+     first contact (`connectQZ()`/`getPrinters()`) — resolvers re-asserted,
+     printers discovered, remembered printer restored, `connected` +
+     `printers-loaded` emitted, cached afterwards (no discovery churn).
+- **`SmartPrint.getStatus()`** added as an alias of `status()` — users
+  instinctively type `getStatus()`.
+- **`GET /qz/test/pdf` now always serves a REAL PDF.** When
+  `barryvdh/laravel-dompdf` was absent the endpoint fell back to a ~755-byte
+  HTML page — QZ Tray downloads URLs ITSELF (no browser session), so every
+  silent PDF print of the test document died with
+  `Cannot parse (FILE)… as a PDF file: End-of-File, expected line at offset 755`
+  (and the misdirected guard refused to print the HTML as a fallback). A
+  built-in minimal PDF writer (pure PHP, byte-exact xref offsets, no
+  dependencies) now produces the document when DomPDF is not installed.
+- **Legacy `SmartPrint.print()` hydrates too.** `print(url)` and
+  `print({ url, type: 'pdf', … })` previously bypassed the browser-fetch
+  hydration engine, so QZ received the raw `(FILE)` URL and failed on
+  session-protected routes with the same "Cannot parse" error. Both forms
+  now ride the identical pipeline as `printUrl()`/`printPdf()`: type
+  auto-detect, same-origin hydration (bytes instead of URL),
+  misdirected-content guard (resolves `unexpected-response` + emits
+  `job-failed`), printer/copies preserved. Data-carrying jobs
+  (`zpl`/`escpos`/`raw`/base64) are untouched, and a non-OK fetch still
+  degrades to the legacy URL behavior.
+
 ## [1.4.2] — 2026-09-13
 
 ### Fixed

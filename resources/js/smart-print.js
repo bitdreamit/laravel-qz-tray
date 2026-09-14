@@ -170,6 +170,18 @@ window.SmartPrint = (() => {
         return document.querySelector('meta[name="csrf-token"]')?.content ?? '';
     }
 
+    // v1.5.0: Laravel also accepts the encrypted XSRF-TOKEN cookie as a CSRF
+    // credential (header X-XSRF-TOKEN). The cookie survives much longer than
+    // a hard-coded meta tag on a page the user kept open for hours, so
+    // sending BOTH fixes the "POST /qz/print 419" seen on long-lived tabs
+    // and layouts that forget the csrf meta tag entirely.
+    function xsrfCookie() {
+        try {
+            const m = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]*)/);
+            return m ? decodeURIComponent(m[1]) : '';
+        } catch (e) { return ''; }
+    }
+
     // ============================
     // HTML escaping (AUDIT C3)
     // ============================
@@ -231,6 +243,10 @@ window.SmartPrint = (() => {
         printers:     [],
         currentPrinter: null,
         _lastSyncedKey: null, // AUDIT M6: suppress redundant server syncs
+        _jobLogBlocked: false, // v1.5.0: stop logging after 419/401 (token/session dead)
+        _lastReconnectTry: 0,  // v1.5.0: reconnect backoff clock
+        _defaultPrinter: null, // v1.5.0: OS default printer name, resolved once per connection
+        _adoptPromise: null,   // v1.5.0: in-flight adoptActiveConnection() — no double discovery
         queue:        [],
         failedQueue:  [],
         listeners:    {},
@@ -241,6 +257,31 @@ window.SmartPrint = (() => {
 
     // Path key: use full pathname for per-page printer memory
     const pathKey = () => location.pathname;
+
+    // v1.5.0 single-flight connect shim. Host apps frequently ship their OWN
+    // legacy QZ bootstrap (app.js calling qz.websocket.connect() on load, with
+    // its own certificate/sign promises). Two uncoordinated connect paths
+    // churn the same socket — the handshake fails with "Failed to get
+    // certificate" and prints throw "sendData is not a function". Routing
+    // every PLAIN connect() call through this module's single-flight attempt
+    // means smart-print's security setup is always in force and only ONE
+    // socket ever exists. Custom host/port options still pass through native
+    // (v1.5.0: but only after re-arming OUR certificate/sign resolvers —
+    // legacy bootstraps open those sockets before setupSecurity ever ran,
+    // and QZ Tray's first challenge then rejected with bare "undefined").
+    // attemptConnect() bypasses the shim via nativeWsConnect — otherwise it
+    // would await its own connectPromise (a self-deadlock).
+    let nativeWsConnect = null;
+    if (typeof window !== 'undefined' && window.qz && qz.websocket) {
+        nativeWsConnect = qz.websocket.connect.bind(qz.websocket);
+        qz.websocket.connect = function (opts) {
+            if (opts && typeof opts === 'object' && Object.keys(opts).length) {
+                try { setupSecurity(); } catch (e) {}   // never ship an unregistered cert resolver
+                return nativeWsConnect(opts);
+            }
+            return connectQZ(1);
+        };
+    }
 
     // ============================
     // Event emitter
@@ -257,16 +298,20 @@ window.SmartPrint = (() => {
     function setupSecurity() {
         if (!window.qz) return;
 
-        qz.security.setCertificatePromise(resolve =>
+        qz.security.setCertificatePromise((resolve, reject) =>
             fetch(endpoint('certificate'), {
                 cache: 'no-store',
                 headers: { 'X-Device-Id': getDeviceId() },
             })
                 .then(r => {
-                    if (!r.ok) throw new Error('Certificate fetch failed: ' + r.status);
+                    if (!r.ok) throw new Error('Certificate fetch failed: HTTP ' + r.status);
                     return r.text();
                 })
                 .then(resolve)
+                // v1.5.0: never let the rejection reason be bare undefined —
+                // qz-tray logs "Failed to get certificate: undefined" and the
+                // root cause becomes untraceable. Surface the real error.
+                .catch(reject)
         );
 
         qz.security.setSignatureAlgorithm('SHA512');
@@ -278,6 +323,7 @@ window.SmartPrint = (() => {
                 headers: {
                     'Content-Type':  'application/json',
                     'X-CSRF-TOKEN':  csrfToken(),
+                    'X-XSRF-TOKEN':  xsrfCookie(), // v1.5.0: works even without the meta tag
                     'X-Device-Id':   getDeviceId(),
                     'Accept':        'text/plain',
                 },
@@ -298,7 +344,7 @@ window.SmartPrint = (() => {
     // callers now share the same in-flight attempt via state.connectPromise.
     async function attemptConnect(retries) {
         try {
-            await qz.websocket.connect();
+            await (nativeWsConnect ? nativeWsConnect() : qz.websocket.connect());
             state.qzReady = true;
             try {
                 state.printers = await qz.printers.find();
@@ -336,6 +382,36 @@ window.SmartPrint = (() => {
         }
     }
 
+    // v1.5.0: ADOPT a socket somebody else opened. Legacy app.js bootstraps
+    // call qz.websocket.connect() directly (sometimes with custom host/port
+    // opts that bypass the single-flight shim) — frequently BEFORE
+    // DOMContentLoaded, i.e. before init()/connectQZ() ever ran. The socket
+    // then exists, authenticated even, but SmartPrint stayed blind:
+    // state.printers stayed [], 'connected' never fired, getPrinters()
+    // returned [] while qz.printers.find() clearly worked. Adoption runs the
+    // discovery + restore + event flow for such sockets, once.
+    function adoptActiveConnection() {
+        if (!window.qz || !qz.websocket.isActive()) return Promise.resolve(false);
+        if (state.printers.length) return Promise.resolve(true);   // already ours
+        if (state._adoptPromise) return state._adoptPromise;
+
+        state._adoptPromise = (async () => {
+            try { setupSecurity(); } catch (e) {}   // re-assert OUR resolvers for future challenges
+            try {
+                state.printers = await qz.printers.find();
+            } catch (e) {
+                state.printers = [];   // connected Tray with zero usable printers still counts
+            }
+            state.qzReady = true;
+            try { restorePrinter(); } catch (e) {}
+            emit('connected', { printers: state.printers });
+            emit('printers-loaded', { printers: state.printers });
+            return true;
+        })().finally(() => { state._adoptPromise = null; });
+
+        return state._adoptPromise;
+    }
+
     async function connectQZ(retries = 2) {
         if (!window.qz) {
             console.warn('[SmartPrint] QZ Tray library not loaded. Add <script src="' +
@@ -344,7 +420,7 @@ window.SmartPrint = (() => {
             return false;
         }
 
-        if (qz.websocket.isActive()) return true;
+        if (qz.websocket.isActive()) return adoptActiveConnection();
 
         if (state.connectPromise) {
             return state.connectPromise;
@@ -628,7 +704,7 @@ window.SmartPrint = (() => {
     // or fork a second row (bigint mode) — the old behavior left every row
     // stuck at 'pending' forever and made the queue endpoints useless.
     function logPrintJob(job, printer, status, errorMessage) {
-        if (!serverSyncEnabled()) return;
+        if (!serverSyncEnabled() || state._jobLogBlocked) return;
         // Per-job value wins; otherwise fall back to a page-wide default set
         // by the host app (e.g. window.QZ_CONFIG.tenantId = '{{ $project->id }}'
         // — works whether that id is a bigint or a uuid string).
@@ -642,6 +718,7 @@ window.SmartPrint = (() => {
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-TOKEN': csrfToken(),
+                'X-XSRF-TOKEN': xsrfCookie(),   // v1.5.0: cookie survives a stale meta tag
                 'X-Device-Id':  getDeviceId(),
                 'Accept':       'application/json',
             },
@@ -658,6 +735,11 @@ window.SmartPrint = (() => {
                 error_message: errorMessage || undefined,
                 metadata:  { status: status || 'completed' },
             }),
+        }).then(r => {
+            // v1.5.0: 419/401 = session/token dead (long-lived tab, logged out
+            // elsewhere). Job logging is best-effort — flip the flag so the
+            // page stops spraying 419s on every print; printing continues.
+            if (r && (r.status === 419 || r.status === 401)) state._jobLogBlocked = true;
         }).catch(() => {}); // logging failure must never block/alter the print result
     }
 
@@ -679,8 +761,6 @@ window.SmartPrint = (() => {
         const printer = resolveAlias(job.printer) || state.currentPrinter;
 
         if (!printer) {
-            // v1.5.0: no remembered printer -> print straight to the SYSTEM
-            // DEFAULT printer (qz.configs.create(null, …) = OS default).
             // The old flow parked every job behind the "Select Printer"
             // modal, which lab/kiosk users read as an error — and when the
             // tray had no printer list it shouted "No printers found. Is
@@ -693,9 +773,38 @@ window.SmartPrint = (() => {
                 openPrinterModal(job);
                 return;
             }
-        } else {
-            rememberPrinter(printer);
+
+            // v1.5.0: no remembered printer -> print to the OS DEFAULT
+            // printer. QZ Tray 2.2 REJECTS an empty printer name with
+            // "Error: A printer must be specified before printing", so the
+            // default printer's real NAME must be resolved via
+            // qz.printers.getDefault() (QZ Tray 2.1+) once per connection.
+            try {
+                if (!state._defaultPrinter) {
+                    state._defaultPrinter = await qz.printers.getDefault();
+                }
+                printer = state._defaultPrinter;
+            } catch (_) { /* older tray / no default — fall through */ }
+
+            if (!printer && state.printers && state.printers.length) {
+                printer = state.printers[0]; // last resort: first known printer
+            }
+
+            if (!printer) {
+                // Tray answered but no usable printer is known — the browser
+                // fallback is the honest result.
+                const printed = fallback(job);
+                if (printed) {
+                    notifyFallback(job);
+                    job._resolve && job._resolve({ jobId: job.id, success: false, fallback: true, reason: 'no-printer' });
+                } else {
+                    offlineBuffer(job);
+                }
+                return;
+            }
         }
+
+        rememberPrinter(printer);
 
         const cfgOpts = { copies: parseInt(job.copies, 10) || 1 };
 
@@ -790,6 +899,41 @@ window.SmartPrint = (() => {
             safeCallback(job.onComplete, job);
             job._resolve && job._resolve({ jobId: job.id, success: true });
         } catch (err) {
+            // v1.5.0 stale-socket recovery. When the tray quits / crashes /
+            // the PC sleeps mid-session, qz.websocket.isActive() can STILL
+            // report true while the socket underneath is gone — qz.print then
+            // throws "TypeError: e.websocket.connection.sendData is not a
+            // function" (or a similar websocket TypeError) instead of a real
+            // print error, and every following print failed the same way
+            // until a page reload. Detect it, force a REAL reconnect, and
+            // retry the exact same job once before falling back.
+            const rawMsg   = String((err && err.message) || err || '');
+            const staleSocket = err instanceof TypeError
+                && /sendData|not a function|websocket|connection/i.test(rawMsg);
+
+            if (staleSocket) {
+                console.warn('[SmartPrint] Dead tray socket detected — reconnecting and retrying once…');
+                try { qz.websocket.close(); } catch (_) {}
+                state.qzReady   = false;
+                state.printers  = [];
+                state._defaultPrinter = null; // fresh connection may resolve a new default
+
+                const reconnected = await connectQZ(1);
+                if (reconnected) {
+                    try {
+                        logPrintJob(job, printer, 'processing');
+                        await qz.print(cfg, payload);
+                        emit('job-completed', { job });
+                        logPrintJob(job, printer, 'completed');
+                        safeCallback(job.onComplete, job);
+                        job._resolve && job._resolve({ jobId: job.id, success: true });
+                        return;
+                    } catch (retryErr) {
+                        err = retryErr; // fall through to the normal failure path
+                    }
+                }
+            }
+
             console.error('[SmartPrint] Print error:', err);
             emit('job-failed', { job, error: err });
             safeCallback(job.onError, err, job);
@@ -1419,14 +1563,28 @@ window.SmartPrint = (() => {
     })();
 
     // ============================
-    // Auto-reconnect every 10s if disconnected
+    // Auto-reconnect if disconnected (with backoff)
     // ============================
+    // v1.5.0: a machine without (or with a crashed) QZ Tray used to hammer
+    // all four QZ ports every 10 seconds forever — a wall of
+    // "WebSocket connection failed" console spam. After 4 consecutive
+    // failed ticks the interval backs off to once a minute, and a success
+    // resets it immediately.
+    let reconnectFails = 0;
     setInterval(() => {
-        if (window.qz && !qz.websocket.isActive() && !state.connecting) {
-            connectQZ(1).catch(() => {
-                // Swallow — the connection-failed event already fires inside.
-            });
-        }
+        if (!window.qz || qz.websocket.isActive() || state.connecting) return;
+
+        const due = Date.now() - state._lastReconnectTry >= (reconnectFails > 4 ? 60000 : 10000);
+        if (!due) return;
+
+        state._lastReconnectTry = Date.now();
+        connectQZ(1).then(ok => {
+            if (ok) reconnectFails = 0;
+        }).catch(() => {
+            // Swallow — the connection-failed event already fires inside.
+        }).finally(() => {
+            reconnectFails++;
+        });
     }, 10000);
 
     // ============================
@@ -1443,6 +1601,14 @@ window.SmartPrint = (() => {
             emit('ready', { printers: state.printers });
         });
     }
+
+    // v1.5.0: arm the certificate/sign resolvers IMMEDIATELY — not lazily on
+    // the first connect. app.js bundles open the socket during their own
+    // bundle evaluation (before DOMContentLoaded), and QZ Tray's very first
+    // challenge then found no certificate promise at all:
+    // qz-tray.js callCert() rejects bare -> "Failed to get certificate:
+    // undefined" -> sendCert(null) -> unauthenticated session.
+    try { setupSecurity(); } catch (e) { /* qz lib absent — connectQZ warns */ }
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
@@ -1543,7 +1709,12 @@ window.SmartPrint = (() => {
             });
 
             spec.hydrate = { ok: res.ok, status: res.status };
-            if (!res.ok) return spec; // keep url — QZ/fallback may still manage
+            // Non-OK (401/403/404/419/500 …): keep the URL — the QZ/fallback
+            // chain still manages it, and QZ Tray may even succeed where the
+            // page's fetch was refused. Misdirected CONTENT (a 200 OK that
+            // answers text/html where a pdf/image was expected) is refused
+            // further down.
+            if (!res.ok) return spec;
 
             const ct = String((res.headers && res.headers.get && res.headers.get('Content-Type')) || '')
                 .split(';')[0].trim().toLowerCase();
@@ -1947,13 +2118,53 @@ window.SmartPrint = (() => {
         init,
         bind,
         print: (urlOrOptions, options) => {
+            const opts = options || {};
+            // v1.5: print(url) now rides the SAME pipeline as printUrl(url) —
+            // type auto-detect + browser-fetch hydration + misdirected guard.
             if (typeof urlOrOptions === 'string') {
-                return enqueue({ url: urlOrOptions, type: 'pdf', copies: 1, ...options });
+                return run('printUrl', urlOrOptions, opts);
             }
-            // Normalise copies to an integer so downstream code can rely on it.
-            const job = { ...urlOrOptions };
-            if (job.copies !== undefined) job.copies = parseInt(job.copies, 10) || 1;
-            return enqueue(job);
+
+            // Legacy object form { url, type:'pdf', printer, copies, profile… }.
+            const raw = { ...(urlOrOptions || {}) };
+            if (raw.copies !== undefined) raw.copies = parseInt(raw.copies, 10) || 1;
+
+            // v1.5: URL-only pdf/image/html jobs are hydrated through the
+            // page (session cookies included) BEFORE QZ Tray downloads them
+            // itself — previously print({url}) bypassed that, so QZ fetched
+            // session-protected routes bare and failed with "Cannot parse
+            // (FILE)… as a PDF". Raw/zpl/escpos and data-carrying jobs keep
+            // the untouched legacy path.
+            const spec0 = resolveOne(raw);
+            const isUrlDoc = !!spec0 && !!spec0.url && !spec0.data && !spec0.base64 && !spec0.element
+                && (spec0.type === 'pdf' || spec0.type === 'image' || spec0.type === 'html');
+            if (!isUrlDoc) return enqueue(raw);
+
+            return hydrateSpec(spec0, spec0.type, opts).then(spec => {
+                if (spec.hydrate && spec.hydrate.misdirected) {
+                    console.warn('[SmartPrint] print(): ' + spec.url + ' returned '
+                        + (spec.hydrate.contentType || 'unknown')
+                        + ' (HTTP ' + (spec.hydrate.status || '?') + ') — login/error page? Nothing printed.');
+                    emit('job-failed', {
+                        job: spec,
+                        error: new Error('unexpected-response'
+                            + (spec.hydrate.contentType ? ' (' + spec.hydrate.contentType + ')' : '')),
+                    });
+                    return {
+                        success: false,
+                        reason: 'unexpected-response',
+                        url: spec.url,
+                        contentType: spec.hydrate.contentType || undefined,
+                        status: spec.hydrate.status || undefined,
+                    };
+                }
+                const job = specToJob(spec, {}, opts);
+                // resolveOne() does not carry callbacks — restore the ones
+                // the caller passed on the legacy object form.
+                if (raw.onComplete) job.onComplete = raw.onComplete;
+                if (raw.onError)    job.onError    = raw.onError;
+                return enqueue(job);
+            });
         },
         printRaw: (data, type, printer) => enqueue({ data, type: type || 'raw', printer, copies: 1 }),
         printZPL: (zpl, printer)   => enqueue({ data: zpl,   type: 'zpl',    printer, copies: 1 }),
@@ -1999,6 +2210,7 @@ window.SmartPrint = (() => {
         connect:     connectQZ,
         disconnect:  () => window.qz ? qz.websocket.disconnect() : Promise.resolve(),
         isConnected: () => !!(window.qz && qz.websocket.isActive()),
+        getStatus:   () => status(),   // v1.5.0: alias — users instinctively type getStatus()
 
         // Queue
         getQueue:    () => [...state.queue],
