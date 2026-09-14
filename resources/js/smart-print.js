@@ -56,6 +56,12 @@
  * custom function). Configure globally: window.QZ_CONFIG.fallbackMode.
  * Nothing throws unhandled; every promise resolves with a clear result.
  *
+ * Silent by default (v1.5.0) — no "Select Printer" modal, no qz:launch
+ * protocol prompt, no install alerts. With no printer remembered the OS
+ * DEFAULT printer prints. Opt back in per page:
+ *   window.QZ_CONFIG.printerPrompt  = true   (auto "Select Printer" modal)
+ *   window.QZ_CONFIG.launchProtocol = true   (qz:launch tray-start attempt)
+ *
  * Extras: SmartPrint.aliasPrinter('receipt', 'XP-80C'), SmartPrint.status(),
  * SmartPrint.whenReady(3000), printer-alias resolution at print time,
  * PDF base64 printing without a URL, stylesheets cloned into element
@@ -313,7 +319,14 @@ window.SmartPrint = (() => {
             // per page load, then reconnect silently.
             if (retries > 0 && state.launchAttempts < 2) {
                 state.launchAttempts++;
-                try { launchQZProtocol(); } catch (_) {}
+                // v1.5.0: the qz:launch protocol attempt makes Firefox (and
+                // some Chrome builds) pop a native "Open QZ Tray?" / "You'll
+                // need a new app to open this qz link" dialog — an install
+                // alert kiosk users must never see. Off by default now;
+                // opt in per page with window.QZ_CONFIG.launchProtocol = true.
+                if (window.QZ_CONFIG && window.QZ_CONFIG.launchProtocol) {
+                    try { launchQZProtocol(); } catch (_) {}
+                }
                 await new Promise(r => setTimeout(r, 1500));
                 return attemptConnect(retries - 1);
             }
@@ -666,13 +679,23 @@ window.SmartPrint = (() => {
         const printer = resolveAlias(job.printer) || state.currentPrinter;
 
         if (!printer) {
-            // Promise stays pending — resolved/rejected once the user
-            // answers the printer-selection modal (see openPrinterModal).
-            openPrinterModal(job);
-            return;
+            // v1.5.0: no remembered printer -> print straight to the SYSTEM
+            // DEFAULT printer (qz.configs.create(null, …) = OS default).
+            // The old flow parked every job behind the "Select Printer"
+            // modal, which lab/kiosk users read as an error — and when the
+            // tray had no printer list it shouted "No printers found. Is
+            // QZ Tray running?". The modal is now opt-in per page:
+            //   window.QZ_CONFIG.printerPrompt = true    (auto-ask again)
+            //   SmartPrint.showPrinterSwitcher()         (your own button)
+            if (window.QZ_CONFIG && window.QZ_CONFIG.printerPrompt) {
+                // Promise stays pending — resolved/rejected once the user
+                // answers the printer-selection modal (see openPrinterModal).
+                openPrinterModal(job);
+                return;
+            }
+        } else {
+            rememberPrinter(printer);
         }
-
-        rememberPrinter(printer);
 
         const cfgOpts = { copies: parseInt(job.copies, 10) || 1 };
 
