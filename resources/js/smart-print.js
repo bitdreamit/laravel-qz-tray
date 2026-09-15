@@ -65,7 +65,36 @@
  *     fallback queue can never deadlock;
  *   • the tray-connect wait is capped (QZ_CONFIG.connectTimeoutMs, default
  *     8000) — a hung wss://localhost handshake degrades to the browser
- *     instead of parking the first print forever.
+ *     instead of parking the first print forever;
+ *   • every QZ print itself is time-capped too (QZ_CONFIG.printTimeoutMs,
+ *     default 25000) — a tray socket that opened but never answers can no
+ *     longer hold the print queue hostage; the browser fallback fires
+ *     WITHOUT a page reload and later prints keep working;
+ *   • a mid-handshake socket is no longer "adopted" as connected — the
+ *     phantom connected state (and the phantom /qz/printer fetches) that
+ *     routed prints into a dead socket is gone;
+ *   • machines without the tray: auto-reconnect scans ONE port set per
+ *     tick and backs off 10s → 5min instead of hammering every candidate
+ *     socket twice every 10 seconds forever.
+ *
+ * v1.5.5 — the tray is contacted ONLY when needed ("why it call again and
+ * again" is gone):
+ *   • LAZY connect: a page load performs NO connection attempt, NO port
+ *     scan and NO /qz/printer fetch. The FIRST print — or Ctrl+Shift+Q —
+ *     connects. Opt into the old connect-on-load with
+ *     window.QZ_CONFIG.connectOnInit = true;
+ *   • after one failed scan the tray is marked unavailable for a 60s
+ *     cooldown (QZ_CONFIG.unavailableCooldownMs): every print in that
+ *     window goes STRAIGHT to the browser fallback — no reload needed,
+ *     no reconnect storm, no repeated /qz/printer fetches. When the
+ *     cooldown expires the NEXT print probes the tray once more, so
+ *     starting QZ Tray mid-session silently re-enables direct printing;
+ *   • background auto-reconnect is OPT-IN now (QZ_CONFIG.autoReconnect =
+ *     true restores the 10s → 5min ladder for live status pages);
+ *   • Ctrl+Shift+Q anywhere = instant connection check (toast + console:
+ *     "QZ Tray connected — N printers · using X" or "QZ Tray NOT running
+ *     — printing via the browser dialog"). Disable/override with
+ *     window.QZ_CONFIG.connectionHotkey.
  *
  * Silent by default (v1.5.0) — no "Select Printer" modal, no qz:launch
  * protocol prompt, no install alerts. With no printer remembered the OS
@@ -256,8 +285,12 @@ window.SmartPrint = (() => {
         _lastSyncedKey: null, // AUDIT M6: suppress redundant server syncs
         _jobLogBlocked: false, // v1.5.0: stop logging after 419/401 (token/session dead)
         _lastReconnectTry: 0,  // v1.5.0: reconnect backoff clock
+        _serverRestoreTried: false, // v1.5.4: /qz/printer GET once per page, not per connect
         _defaultPrinter: null, // v1.5.0: OS default printer name, resolved once per connection
         _adoptPromise: null,   // v1.5.0: in-flight adoptActiveConnection() — no double discovery
+        qzUnavailableUntil: 0, // v1.5.5: failed-scan cooldown — prints skip the tray until it expires
+        _offlineRetried: false, // v1.5.5: offline queue retried once on the first successful connect
+        _cooldownLogged: false, // v1.5.5: the "unavailable" console note shows once per cooldown window
         queue:        [],
         failedQueue:  [],
         listeners:    {},
@@ -292,6 +325,54 @@ window.SmartPrint = (() => {
             }
             return connectQZ(1);
         };
+    }
+
+    // ============================
+    // QZ-unavailable cooldown (v1.5.5)
+    // ============================
+    // One failed tray scan used to be followed by ANOTHER scan on every
+    // print, every background tick and every phantom adoption — the
+    // "why it call again and again" console storm. After a scan gives up
+    // the tray is marked unavailable for a cooldown window: every print in
+    // that window goes STRAIGHT to the browser fallback (zero scans, zero
+    // /qz/printer fetches, zero console errors — and never a reload).
+    // When the window expires the NEXT print probes the tray once more, so
+    // starting QZ Tray mid-session silently re-enables direct printing.
+    function unavailableCooldownMs() {
+        const cfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.unavailableCooldownMs, 10);
+        return cfg > 0 ? cfg : 60000;   // 60s default
+    }
+    function markQzUnavailable() {
+        state.qzUnavailableUntil = Date.now() + unavailableCooldownMs();
+        emit('qz-unavailable', { cooldownMs: unavailableCooldownMs() });
+    }
+    function clearQzUnavailable() {
+        state.qzUnavailableUntil = 0;
+        state._cooldownLogged = false;
+    }
+    function qzInCooldown() {
+        return Date.now() < state.qzUnavailableUntil;
+    }
+    // One quiet console note per cooldown window — never one line per print.
+    function cooldownSkipNote() {
+        if (state._cooldownLogged) return;
+        state._cooldownLogged = true;
+        console.info('[SmartPrint] QZ Tray unavailable (failed scan, ' + Math.round(unavailableCooldownMs() / 1000)
+            + 's cooldown) — printing via the browser. Press Ctrl+Shift+Q to re-check the tray.');
+        setTimeout(() => { state._cooldownLogged = false; }, unavailableCooldownMs());
+    }
+    // v1.5.5: connect-on-load is OPT-IN. The default page load performs NO
+    // connection attempt at all; the first print (or Ctrl+Shift+Q) connects.
+    function resolveConnectOnInit() {
+        return !!(window.QZ_CONFIG && window.QZ_CONFIG.connectOnInit === true);
+    }
+    // v1.5.5: parked offline jobs retry on the FIRST successful connection —
+    // with lazy connect there is no load-time connect to piggyback on anymore.
+    // (retryOffline is hoisted — defined with the queue management section.)
+    function retryOfflineOnceAfterConnect() {
+        if (state._offlineRetried) return;
+        state._offlineRetried = true;
+        retryOffline();
     }
 
     // ============================
@@ -353,18 +434,34 @@ window.SmartPrint = (() => {
     // caller arriving during a slow connect received `false`, pushed its job
     // to the offline buffer, and printed a duplicate when retrying. All
     // callers now share the same in-flight attempt via state.connectPromise.
+    //
+    // v1.5.4: withTimeout() — qz-tray.js has NO call timeout of its own. A
+    // socket that opens but never answers (phone handshake, auth stuck,
+    // dying tray) leaves find()/adoption promises pending forever, which is
+    // how a print queue ends up blocked until a page reload. Everything we
+    // await below is capped.
+    function withTimeout(promise, ms, timeoutValue) {
+        let t;
+        const cap = new Promise(res => { t = setTimeout(() => res(timeoutValue), ms); });
+        return Promise.race([promise, cap]).finally(() => clearTimeout(t));
+    }
+
     async function attemptConnect(retries) {
         try {
             await (nativeWsConnect ? nativeWsConnect() : qz.websocket.connect());
             state.qzReady = true;
             try {
-                state.printers = await qz.printers.find();
+                // 5s cap: a connected-but-unresponsive tray must not hang the
+                // whole connect chain — zero printers is the safe outcome.
+                state.printers = await withTimeout(qz.printers.find(), 5000, []);
             } catch (listErr) {
                 // A connected Tray with zero usable system printers still
                 // counts as connected; find() can throw instead of [].
                 state.printers = [];
             }
             restorePrinter();
+            clearQzUnavailable();            // v1.5.5: a live tray clears the cooldown
+            retryOfflineOnceAfterConnect();  // v1.5.5: parked jobs ride the first success
             emit('connected', { printers: state.printers });
             emit('printers-loaded', { printers: state.printers });
             return true;
@@ -384,10 +481,17 @@ window.SmartPrint = (() => {
                 if (window.QZ_CONFIG && window.QZ_CONFIG.launchProtocol) {
                     try { launchQZProtocol(); } catch (_) {}
                 }
-                await new Promise(r => setTimeout(r, 1500));
+                // v1.5.5: retry nap is configurable (kiosks can go 0; the
+                // smoke tests do) — default stays 1500ms.
+                const napCfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.connectRetryDelayMs, 10);
+                await new Promise(r => setTimeout(r, napCfg >= 0 ? napCfg : 1500));
                 return attemptConnect(retries - 1);
             }
             state.qzReady = false;
+            // v1.5.5: ONE failed scan is enough. Arm the cooldown so the next
+            // prints skip the tray entirely instead of rescanning (and
+            // re-fetching /qz/printer) on every click.
+            markQzUnavailable();
             emit('connection-failed', { error: err });
             return false;
         }
@@ -408,13 +512,27 @@ window.SmartPrint = (() => {
 
         state._adoptPromise = (async () => {
             try { setupSecurity(); } catch (e) {}   // re-assert OUR resolvers for future challenges
-            try {
-                state.printers = await qz.printers.find();
-            } catch (e) {
-                state.printers = [];   // connected Tray with zero usable printers still counts
+            // v1.5.4: qz.websocket.isActive() ALSO reports true while the
+            // socket is still CONNECTING — a legacy app.js bootstrap's
+            // handshake in flight looks exactly like a live tray. Discovery
+            // on such a socket throws instantly on desktop and hangs on
+            // phones, and the old code treated BOTH as "connected":
+            // qzReady flipped true, a phantom 'connected' fired,
+            // restorePrinter() re-fetched /qz/printer, and the next print
+            // was routed into a dead socket instead of the browser
+            // fallback. Adopt ONLY when discovery actually answers (5s
+            // cap); a mid-handshake socket stays unadopted and the caller
+            // degrades to the fallback it should have used.
+            const found = await withTimeout(qz.printers.find().catch(() => null), 5000, null);
+            if (found === null) {
+                console.info('[SmartPrint] socket found mid-handshake — not adopting yet; prints use the browser fallback until the tray answers.');
+                return false;
             }
+            state.printers = found;   // connected Tray with zero usable printers still counts ([])
             state.qzReady = true;
             try { restorePrinter(); } catch (e) {}
+            clearQzUnavailable();            // v1.5.5
+            retryOfflineOnceAfterConnect();  // v1.5.5
             emit('connected', { printers: state.printers });
             emit('printers-loaded', { printers: state.printers });
             return true;
@@ -423,7 +541,13 @@ window.SmartPrint = (() => {
         return state._adoptPromise;
     }
 
-    async function connectQZ(retries = 2) {
+    // v1.5.4: default retries 2 → 1. Each retry is a FULL port scan (8
+    // candidate sockets in qz-tray.js) + a 1.5s nap; a machine without the
+    // tray used to burn three scans (~24 failed sockets, ~3-4s) before the
+    // first print ever reached the browser fallback. One retry keeps the
+    // "tray woke up late" recovery while halving the dead time and the
+    // console noise. Background ticks pass 0 (one scan, see auto-reconnect).
+    async function connectQZ(retries = 1) {
         if (!window.qz) {
             console.warn('[SmartPrint] QZ Tray library not loaded. Add <script src="' +
                 (window.QZ_CONFIG && window.QZ_CONFIG.assetsBase ? window.QZ_CONFIG.assetsBase : '/vendor/qz-tray/js') + '/qz-tray.min.js"></script> to your page (before smart-print.js).');
@@ -498,7 +622,13 @@ window.SmartPrint = (() => {
         // regenerated only if localStorage itself is cleared) lets it pick
         // its printer back up without asking again. It never overrides a
         // value localStorage already had.
-        if (!saved && serverSyncEnabled()) {
+        //
+        // v1.5.4: the round-trip runs ONCE per page. The old code fired it
+        // on every (re)connect, so a machine without the tray — where every
+        // phantom/false adoption re-entered here — spammed
+        // GET /qz/printer?path=… on the server log for nothing.
+        if (!saved && serverSyncEnabled() && !state._serverRestoreTried) {
+            state._serverRestoreTried = true;
             const tenantId = pageTenantId();
             // AUDIT H3: send the page path as ?path= instead of a URL-encoded
             // path segment. encodeURIComponent(pathname) produces %2F for
@@ -618,13 +748,60 @@ window.SmartPrint = (() => {
                 const capCfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.connectTimeoutMs, 10);
                 const connectCap = capCfg > 0 ? capCfg : 8000;
                 let capTimer;
-                const connected = await Promise.race([
-                    connectQZ(),
-                    new Promise(res => { capTimer = setTimeout(() => res(false), connectCap); }),
-                ]).finally(() => clearTimeout(capTimer));
+                let connected = false;
+                // v1.5.5: an active socket is always usable; otherwise an
+                // armed cooldown SKIPS the scan entirely — the job prints via
+                // the browser without a single reconnect attempt, fetch or
+                // console error. This is the "no more call again and again"
+                // gate.
+                if ((window.qz && qz.websocket.isActive()) || !qzInCooldown()) {
+                    connected = await Promise.race([
+                        connectQZ(),
+                        new Promise(res => { capTimer = setTimeout(() => res(false), connectCap); }),
+                    ]).finally(() => clearTimeout(capTimer));
+                    // Hung handshake (mobile wss://localhost, dying tray): the
+                    // scan never settled, so the NEXT print must not wait for
+                    // another one — arm the cooldown here as well.
+                    if (!connected && window.qz && (state.connecting || state.connectPromise)) {
+                        markQzUnavailable();
+                    }
+                } else {
+                    cooldownSkipNote();
+                }
 
                 if (connected) {
-                    await printQZ(job);
+                    // v1.5.4: PRINT WATCHDOG. A tray socket that opened but
+                    // never answers (hung handshake half-finished, auth
+                    // stuck, dead spooler) used to leave await printQZ(job)
+                    // pending FOREVER: the queue mutex below never released,
+                    // every later print silently piled up in state.queue,
+                    // and only a full page reload printed again. Cap the
+                    // whole QZ attempt — on timeout degrade to the browser
+                    // fallback, release the socket, and keep the queue
+                    // alive. Configurable via QZ_CONFIG.printTimeoutMs.
+                    const ptCfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.printTimeoutMs, 10);
+                    const printCap = ptCfg > 0 ? ptCfg : 25000;
+                    let printTimer;
+                    const outcome = await Promise.race([
+                        printQZ(job),
+                        new Promise(res => { printTimer = setTimeout(() => res('<<qz-watchdog>>'), printCap); }),
+                    ]).finally(() => clearTimeout(printTimer));
+
+                    if (outcome === '<<qz-watchdog>>') {
+                        console.warn('[SmartPrint] QZ print did not settle within ' + printCap +
+                            'ms — degrading to the browser fallback (no reload needed).');
+                        try { qz.websocket.close(); } catch (_) {}
+                        state.qzReady = false;
+                        state.printers = [];
+                        state._defaultPrinter = null;
+                        if (dispatchFallback(job)) {
+                            notifyFallback(job);
+                            emit('job-failed', { job, fallback: true, reason: 'qz-timeout' });
+                            job._resolve && job._resolve({ jobId: job.id, success: false, fallback: true, reason: 'qz-timeout' });
+                        } else {
+                            offlineBuffer(job);
+                        }
+                    }
                 } else {
                     if (state.connecting) {
                         console.info('[SmartPrint] tray connection still pending after ' + connectCap +
@@ -680,13 +857,17 @@ window.SmartPrint = (() => {
     // old behavior remains available via QZ_CONFIG.fallbackMode = 'queue'.
     function handleNoConnection(job) {
         const mode = resolveFallbackMode(job);
-        const printable = job.type === 'pdf' || job.type === 'html';
+        // v1.5.4: 'image' is printable by the browser engines too
+        // (fallbackIframe wraps it in an <img> document) — it used to be
+        // parked in the offline queue with a "QZ Tray offline" error on
+        // phones / tray-less machines instead of just printing.
+        const printable = job.type === 'pdf' || job.type === 'html' || job.type === 'image';
 
         if (!printable || mode === 'queue' || mode === 'offline' || mode === 'none' || mode === false) {
             return offlineBuffer(job);
         }
 
-        const printed = fallback(job);
+        const printed = dispatchFallback(job);
         if (printed) {
             notifyFallback(job);
             emit('job-failed', { job, fallback: true, reason: 'qz-unavailable' });
@@ -811,7 +992,16 @@ window.SmartPrint = (() => {
         // v1.5: printer names may be aliases registered via
         // SmartPrint.aliasPrinter('receipt', 'XP-80C') — resolve at print
         // time so an alias defined after the job was queued still wins.
-        const printer = resolveAlias(job.printer) || state.currentPrinter;
+        // v1.5.4 CRITICAL fix: this was `const` — and the OS-default-printer
+        // branch below REASSIGNS it, so every print with no remembered
+        // printer threw "TypeError: Assignment to constant variable", got
+        // swallowed by processQueue's catch, and the job was parked in the
+        // offline queue instead of printing (or falling back). That is the
+        // "print fails on Windows / phone — no print until reload" report:
+        // fresh browser profiles, cleared localStorage, a vanished printer
+        // or a pending server restore all land on the no-remembered-printer
+        // path. `let` lets the default-printer resolution actually work.
+        let printer = resolveAlias(job.printer) || state.currentPrinter;
 
         if (!printer) {
             // The old flow parked every job behind the "Select Printer"
@@ -846,7 +1036,7 @@ window.SmartPrint = (() => {
             if (!printer) {
                 // Tray answered but no usable printer is known — the browser
                 // fallback is the honest result.
-                const printed = fallback(job);
+                const printed = dispatchFallback(job);
                 if (printed) {
                     notifyFallback(job);
                     job._resolve && job._resolve({ jobId: job.id, success: false, fallback: true, reason: 'no-printer' });
@@ -951,7 +1141,7 @@ window.SmartPrint = (() => {
                 // Unrecognised type: the browser print dialog is the best
                 // we can do, so treat it as a (non-silent) success rather
                 // than leaving the promise unsettled.
-                fallback(job);
+                dispatchFallback(job);
                 emit('job-completed', { job, fallback: true });
                 safeCallback(job.onComplete, job);
                 job._resolve && job._resolve({ jobId: job.id, success: true, fallback: true });
@@ -1009,7 +1199,10 @@ window.SmartPrint = (() => {
             // promise RESOLVES with { success: false, fallback: true } instead
             // of rejecting — callers no longer need try/catch to avoid
             // "Uncaught (in promise)" noise when the tray fails mid-print.
-            const printed = fallback(job);
+            // dispatchFallback (not fallback): if the v1.5.4 print watchdog
+            // already degraded this job, a late error here must NOT print it
+            // a second time.
+            const printed = dispatchFallback(job);
             if (printed) {
                 notifyFallback(job);
                 job._resolve && job._resolve({ jobId: job.id, success: false, fallback: true, error: err });
@@ -1149,6 +1342,17 @@ window.SmartPrint = (() => {
                 // (offlineBuffer or the action runner) decides what's next.
                 return false;
         }
+    }
+
+    // v1.5.4: single-dispatch guard. Two paths can now reach for the browser
+    // fallback for the SAME job — the print watchdog in processQueue (QZ
+    // never settled) and a printQZ that finally wakes up late with an
+    // error. Without the guard a stalled receipt would print TWICE: once
+    // from the watchdog, once when the tray finally answers. First one wins.
+    function dispatchFallback(job) {
+        if (!job || job._fallbackDone) return false;
+        job._fallbackDone = true;
+        return fallback(job);
     }
 
     // Serialize ALL iframe fallbacks through one chain — two simultaneous
@@ -1381,7 +1585,7 @@ window.SmartPrint = (() => {
                 // v1.5: cancelling printer selection must not dead-end the
                 // caller either — 'auto' fallback prints via the browser;
                 // only modes with no printable output still reject.
-                const printed = fallback(jobToQueue);
+                const printed = dispatchFallback(jobToQueue);
                 if (printed) {
                     notifyFallback(jobToQueue);
                     jobToQueue._resolve({ jobId: jobToQueue.id, success: false, fallback: true, cancelled: true });
@@ -1689,26 +1893,76 @@ window.SmartPrint = (() => {
     })();
 
     // ============================
-    // Auto-reconnect if disconnected (with backoff)
+    // Hotkey — Ctrl+Shift+Q tray connection check (v1.5.5)
+    // ============================
+    // Press anywhere: ONE manual tray probe with a toast + console report
+    // ("QZ Tray connected — 2 printers · using XP-80C" / "QZ Tray NOT
+    // running — printing via the browser dialog"). It overrides any
+    // cooldown, so it doubles as "I just started the tray — reconnect
+    // NOW". Disable/override per page:
+    //   window.QZ_CONFIG.connectionHotkey = { enabled: false }
+    //   window.QZ_CONFIG.connectionHotkey = { combination: 'ctrl+alt+q' }
+    (() => {
+        const cfg = (window.QZ_CONFIG && window.QZ_CONFIG.connectionHotkey) || {};
+        if (cfg.enabled === false) return;
+
+        const combo = String(cfg.combination || 'ctrl+shift+q')
+            .toLowerCase().split('+').map(s => s.trim()).filter(Boolean);
+        const modifiers = ['ctrl', 'shift', 'alt', 'meta', 'cmd'];
+        const wantCtrl  = combo.includes('ctrl');
+        const wantShift = combo.includes('shift');
+        const wantAlt   = combo.includes('alt');
+        const wantMeta  = combo.includes('meta') || combo.includes('cmd');
+        const keyPart   = combo.filter(k => !modifiers.includes(k)).pop() || 'q';
+
+        document.addEventListener('keydown', e => {
+            if (e.ctrlKey !== wantCtrl || e.shiftKey !== wantShift
+                || e.altKey !== wantAlt || e.metaKey !== wantMeta) return;
+            if ((e.key || '').toLowerCase() !== keyPart) return;
+            e.preventDefault();
+            connectionCheck();
+        });
+    })();
+
+    // ============================
+    // Auto-reconnect if disconnected (with backoff) — OPT-IN since v1.5.5
     // ============================
     // v1.5.0: a machine without (or with a crashed) QZ Tray used to hammer
     // all four QZ ports every 10 seconds forever — a wall of
-    // "WebSocket connection failed" console spam. After 4 consecutive
-    // failed ticks the interval backs off to once a minute, and a success
-    // resets it immediately.
+    // "WebSocket connection failed" console spam.
+    //
+    // v1.5.4: TWO changes kill the storm the console used to show:
+    //   1. ticks pass retries=0 to connectQZ — ONE full port scan (8
+    //      candidate sockets) per tick instead of two scans + a 1.5s nap;
+    //   2. the tick interval backs off progressively per consecutive
+    //      failure — 10s → 30s → 60s → 2min → 5min (cap). A success resets
+    //      the ladder immediately, so a tray started mid-session is picked
+    //      up within seconds of the NEXT tick.
+    //
+    // v1.5.5: background probing is OPT-IN. Lazy connect + the print-time
+    // probe + the unavailable cooldown fully replace it — a page whose tray
+    // is absent now performs ZERO background scans. Live status pages opt
+    // back in with window.QZ_CONFIG.autoReconnect = true (the ladder below
+    // still applies, and the cooldown still gates every tick).
     let reconnectFails = 0;
+    const RECONNECT_LADDER = [10000, 30000, 60000, 120000, 300000];
     setInterval(() => {
-        if (!window.qz || qz.websocket.isActive() || state.connecting) return;
+        if (!window.qz || qz.websocket.isActive()) return;
+        if (!(window.QZ_CONFIG && window.QZ_CONFIG.autoReconnect === true)) return; // v1.5.5
+        if (qzInCooldown()) return;                                                 // v1.5.5
+        // state.connectPromise covers a HUNG attempt (phone handshake that
+        // never settles) — without this guard every tick would still think
+        // it is due and pile a second chain behind the stuck one.
+        if (state.connecting || state.connectPromise) return;
 
-        const due = Date.now() - state._lastReconnectTry >= (reconnectFails > 4 ? 60000 : 10000);
-        if (!due) return;
+        const wait = RECONNECT_LADDER[Math.min(reconnectFails, RECONNECT_LADDER.length - 1)];
+        if (Date.now() - state._lastReconnectTry < wait) return;
 
         state._lastReconnectTry = Date.now();
-        connectQZ(1).then(ok => {
-            if (ok) reconnectFails = 0;
+        connectQZ(0).then(ok => {
+            reconnectFails = ok ? 0 : reconnectFails + 1;
         }).catch(() => {
             // Swallow — the connection-failed event already fires inside.
-        }).finally(() => {
             reconnectFails++;
         });
     }, 10000);
@@ -1721,11 +1975,18 @@ window.SmartPrint = (() => {
         if (window.QZ_CONFIG && window.QZ_CONFIG.observeDom) {
             observeDom();
         }
-        connectQZ().then(() => {
-            retryOffline();
-            updateQueueUI();
-            emit('ready', { printers: state.printers });
-        });
+        // v1.5.5: LAZY connection. A page load no longer scans the tray
+        // ports, no longer fetches /qz/printer, and no longer produces a
+        // single console error on machines without QZ Tray. The first
+        // print — or Ctrl+Shift+Q — connects. Machines WITH the tray behave
+        // exactly as before (the first print pays the connect; later prints
+        // are instant). Opt back into connect-on-load:
+        // window.QZ_CONFIG.connectOnInit = true.
+        if (resolveConnectOnInit()) {
+            connectQZ().then(() => { retryOffline(); updateQueueUI(); });
+        }
+        updateQueueUI();
+        emit('ready', { printers: state.printers, lazyConnect: !resolveConnectOnInit() });
     }
 
     // v1.5.0: arm the certificate/sign resolvers IMMEDIATELY — not lazily on
@@ -2264,7 +2525,40 @@ window.SmartPrint = (() => {
             failed:         state.failedQueue.length,
             fallbackMode:   resolveFallbackMode({}),
             actions:        Object.keys(actions),
+            // v1.5.5: how much longer prints skip the tray (failed-scan
+            // cooldown). 0 = the next print will probe the tray normally.
+            unavailableForMs: Math.max(0, (state.qzUnavailableUntil || 0) - Date.now()),
+            connectOnInit:    resolveConnectOnInit(),
         };
+    }
+
+    // v1.5.5 — the Ctrl+Shift+Q connection check (and SmartPrint.connectionCheck()).
+    // ONE manual probe: clears the unavailable cooldown (explicit user
+    // intent — "I just started the tray, reconnect NOW"), scans the tray
+    // ports once, and reports the result as a toast + console line. Never
+    // throws, never prints — pure diagnostics + recovery.
+    async function connectionCheck() {
+        if (!window.qz) {
+            toastNotice('QZ Tray: library not loaded — browser printing only');
+            console.info('[SmartPrint] connection check: qz-tray.min.js is not on this page — the browser fallback handles every print.');
+            return { ok: false, reason: 'qz-library-missing' };
+        }
+        state.qzUnavailableUntil = 0;   // a manual check always overrides the cooldown
+        let ok = false;
+        try { ok = await connectQZ(0) === true; } catch (e) { ok = false; }
+        if (ok || (qz.websocket && qz.websocket.isActive())) {
+            const n = state.printers.length;
+            toastNotice('QZ Tray connected — ' + n + ' printer' + (n === 1 ? '' : 's')
+                + (state.currentPrinter ? ' · using ' + state.currentPrinter : ''));
+            console.info('[SmartPrint] connection check: connected.',
+                { printers: [...state.printers], using: state.currentPrinter });
+            return { ok: true, reason: 'connected', printers: [...state.printers], printer: state.currentPrinter };
+        }
+        // connectQZ's failed scan already re-armed the cooldown.
+        toastNotice('QZ Tray NOT running — printing via the browser dialog');
+        console.info('[SmartPrint] connection check: tray not reachable. Prints use the browser fallback; '
+            + 'the next print probes the tray again in ~' + Math.round(unavailableCooldownMs() / 1000) + 's.');
+        return { ok: false, reason: 'connection-refused' };
     }
 
     // Resolves as soon as the tray connection is known — either established,
@@ -2366,7 +2660,7 @@ window.SmartPrint = (() => {
         printESC: (escpos, printer) => enqueue({ data: escpos, type: 'escpos', printer, copies: 1 }),
 
         // ---- Smart Actions (v1.5) -------------------------------------
-        version: '1.5.4',
+        version: '1.5.5',
         define,                       // register named actions (+ window globals)
         run,                          // run('printLabReceipt', input, overrides)
         has:    name => !!actions[name],
@@ -2406,6 +2700,8 @@ window.SmartPrint = (() => {
         disconnect:  () => window.qz ? qz.websocket.disconnect() : Promise.resolve(),
         isConnected: () => !!(window.qz && qz.websocket.isActive()),
         getStatus:   () => status(),   // v1.5.0: alias — users instinctively type getStatus()
+        connectionCheck,               // v1.5.5: Ctrl+Shift+Q tray probe (manual API too)
+        checkConnection: connectionCheck,
 
         // Queue
         getQueue:    () => [...state.queue],

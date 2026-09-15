@@ -1,7 +1,7 @@
 # Laravel QZ Tray
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-1.5.0-6f42c1?style=for-the-badge" alt="v1.5.0">
+  <img src="https://img.shields.io/badge/Version-1.5.0-6f42c1?style=for-the-badge" alt="v1.5.5">
   <img src="https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012%20|%2013-FF2D20?style=for-the-badge&logo=laravel&logoColor=white" alt="Laravel">
   <img src="https://img.shields.io/badge/PHP-8.1%2B-777BB4?style=for-the-badge&logo=php&logoColor=white" alt="PHP">
   <img src="https://img.shields.io/badge/QZ%20Tray-2.2.6-0078D4?style=for-the-badge" alt="QZ Tray">
@@ -301,6 +301,21 @@ Every page that prints needs the CSRF meta tag (for the signing endpoints) and t
 ```
 
 > **The CSRF meta tag is required.** SmartPrint sends it with every `POST /qz/sign` and `POST /qz/print`. Without it you will get `419 CSRF token mismatch`.
+
+**v1.5.5 — skip the manual `<script>` tags and get automatic cache busting:**
+
+```blade
+    {{-- replaces the two <script> tags above — ?v={filemtime} busts the
+         browser cache automatically on every file change --}}
+    @qzTrayScripts
+
+    {{-- your own app files get the same treatment --}}
+    @qzTrayScripts(['js/lab-receipt.js'])
+```
+
+The URL only changes when the file actually changes, so browsers cache
+normally between deploys — no more deleting cache by hand after every JS
+update.
 
 **Multi-tenant apps** — tag every print with the tenant once, page-wide:
 
@@ -1165,6 +1180,20 @@ return [
 | `onFallback(job)` | — | Hook invoked on every fallback print |
 | `observeDom` | `false` | MutationObserver: auto-print elements injected after load (Turbo/Livewire/AJAX) fire too |
 | `hotkey` | from config | Printer-switcher shortcut |
+| `connectOnInit` | `false` | v1.5.5: connect at page load. Default **OFF** — the tray is contacted on the FIRST print or Ctrl+Shift+Q (no scans, no `/qz/printer` fetch, no console errors on machines without the tray) |
+| `autoReconnect` | `false` | v1.5.5: background reconnect ladder (10s → 5min) for live status pages. Print-time probing makes it unnecessary for printing |
+| `unavailableCooldownMs` | `60000` | v1.5.5: after one failed tray scan, prints skip the tray entirely (straight to the browser, no reload) for this long; the next print probes once more |
+| `connectTimeoutMs` | `8000` | Cap on waiting for a (possibly hung) handshake before the print degrades to the browser |
+| `printTimeoutMs` | `25000` | Cap on a silent QZ print before the browser fallback takes over |
+| `connectionHotkey` | `ctrl+shift+q` | v1.5.5 tray connection-check shortcut (`{ enabled: false }` to disable, `combination` to rebind) |
+| `connectRetryDelayMs` | `1500` | v1.5.5: nap between connect retries (0 = scan once, no retry nap) |
+
+**Connection check (v1.5.5):** press **Ctrl+Shift+Q** anywhere for an instant
+tray probe — toast + console shows `QZ Tray connected — N printers · using X`
+or `QZ Tray NOT running — printing via the browser dialog`. It overrides any
+cooldown, so it also doubles as "I just started the tray — reconnect now".
+Programmatically: `SmartPrint.connectionCheck()`; current state:
+`SmartPrint.status().unavailableForMs`.
 
 ## Artisan Commands
 

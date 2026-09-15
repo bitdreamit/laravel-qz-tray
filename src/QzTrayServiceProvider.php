@@ -2,6 +2,7 @@
 
 namespace Bitdreamit\QzTray;
 
+use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
@@ -13,7 +14,7 @@ class QzTrayServiceProvider extends ServiceProvider
      * agree with composer.json (the previous hardcoded '1.0.0' in the
      * controller drifted from the real version). Bump on every release.
      */
-    public const VERSION = '1.5.4';
+    public const VERSION = '1.5.5';
 
     public function boot(): void
     {
@@ -46,6 +47,18 @@ class QzTrayServiceProvider extends ServiceProvider
         ], 'qz-installers');
 
         $this->loadRoutesFrom(__DIR__.'/../routes/web.php');
+
+        // v1.5.5: @qzTrayScripts — cache-busted <script> tags without
+        // hand-edited ?time= parameters or manual cache clears after every
+        // JS update. The bare directive emits qz-tray.min.js +
+        // smart-print.js with ?v={filemtime}; pass extra APP files to bust
+        // them the same way:
+        //   @qzTrayScripts(['js/lab-receipt.js'])
+        // The version query changes only when the file actually changes, so
+        // normal browser caching keeps working in between deploys.
+        Blade::directive('qzTrayScripts', function ($expression) {
+            return "<?php echo \\Bitdreamit\\QzTray\\QzTrayServiceProvider::renderScriptTags($expression); ?>";
+        });
 
         // Optionally load API routes when the host app wants a stateless,
         // sanctum-protected surface. Enabled via config('qz-tray.routes.api.enabled').
@@ -94,6 +107,45 @@ class QzTrayServiceProvider extends ServiceProvider
             __DIR__.'/../config/qz-tray.php',
             'qz-tray'
         );
+    }
+
+    /**
+     * v1.5.5: render cache-busted <script> tags for the QZ scripts (and any
+     * app files passed in).
+     *
+     * The cache-bust value is the file's own mtime: redeploy the file and
+     * every browser fetches the new copy on the next navigation, while the
+     * URL stays stable in between so normal browser caching keeps working.
+     * A missing file (assets not published yet) falls back to the package
+     * version so the directive never throws during setup.
+     *
+     * Usage in a layout/blade view:
+     *   @qzTrayScripts                                qz-tray.min.js + smart-print.js
+     *   @qzTrayScripts('js/lab-receipt.js')           one app file
+     *   @qzTrayScripts(['js/lab-receipt.js', 'js/app.js'])   several
+     */
+    public static function renderScriptTags($paths = null): string
+    {
+        if (is_string($paths) && $paths !== '') {
+            $paths = [$paths];
+        } elseif (! is_array($paths) || $paths === []) {
+            $paths = ['vendor/qz-tray/js/qz-tray.min.js', 'vendor/qz-tray/js/smart-print.js'];
+        }
+
+        $html = '';
+
+        foreach ($paths as $path) {
+            $path = ltrim(str_replace(['\\', '//'], '/', (string) $path), '/');
+            $absolute = public_path($path);
+
+            $version = is_file($absolute)
+                ? (string) filemtime($absolute)
+                : self::VERSION.'-unpublished';
+
+            $html .= '<script src="'.e(asset($path)).'?v='.$version.'"></script>';
+        }
+
+        return $html;
     }
 
     /**

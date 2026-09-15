@@ -3,6 +3,50 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.5.5] — 2026-09-16
+
+### Added
+- **Lazy tray connection — the page no longer calls QZ Tray on load.**
+  smart-print.js now connects on the FIRST PRINT (or Ctrl+Shift+Q), not at
+  `DOMContentLoaded`. A desktop without the tray (or any phone) loads the
+  page with **zero** websocket scans, zero `GET /qz/printer` calls and zero
+  console errors. Opt back into the old behavior with
+  `window.QZ_CONFIG.connectOnInit = true`.
+- **Ctrl+Shift+Q — instant connection check.** One manual tray probe that
+  overrides any cooldown: toast + console report — `QZ Tray connected —
+  N printers · using X` or `QZ Tray NOT running — printing via the browser
+  dialog`. Disable/override with
+  `window.QZ_CONFIG.connectionHotkey = { enabled, combination }`. Also
+  callable programmatically: `SmartPrint.connectionCheck()` (alias
+  `checkConnection()`).
+- **`@qzTrayScripts` Blade directive — automatic cache busting.** No more
+  hand-edited `?time=` parameters or manual cache clears after every JS
+  update. `@qzTrayScripts` in a layout emits `qz-tray.min.js` +
+  `smart-print.js` with `?v={filemtime}`; `@qzTrayScripts(['js/lab-receipt.js'])`
+  busts your own app files the same way. The query changes only when the
+  file actually changes, so browser caching keeps working between deploys.
+
+### Changed
+- **QZ-unavailable cooldown — "call again and again" is gone.** After one
+  full failed port scan the client marks the tray unavailable for 60s
+  (`window.QZ_CONFIG.unavailableCooldownMs`): every print in that window
+  goes STRAIGHT to the browser fallback — no reconnect storm, no repeated
+  `/qz/printer` fetches, no page reload needed. When the cooldown expires
+  the next print probes the tray once more, so starting QZ Tray mid-session
+  silently re-enables direct printing (Ctrl+Shift+Q forces it immediately).
+- **Background auto-reconnect is now opt-in** (`window.QZ_CONFIG.autoReconnect
+  = true`). The print-time probe + cooldown fully replace it; the
+  10s → 5min backoff ladder remains available for live status pages.
+- Offline-queued jobs (`fallbackMode: 'queue'`) now retry on the FIRST
+  successful connection instead of at page load (lazy-connect companion).
+- A hung handshake that degrades to the browser fallback
+  (`connectTimeoutMs`) also arms the cooldown: the next print no longer
+  waits for another hung `wss://localhost` handshake — it prints via the
+  browser immediately.
+- New `QZ_CONFIG.connectRetryDelayMs` (default 1500) configures the nap
+  between connect retries; `SmartPrint.status()` now reports
+  `unavailableForMs` + `connectOnInit`.
+
 ## [1.5.0] — 2026-09-14
 
 ### Added — "Universal Print API + Smart Actions" client layer (resources/js/smart-print.js)
@@ -224,6 +268,51 @@ were the earlier fix batches). Everything below ships in this release.
   (`QZ_CONFIG.connectTimeoutMs`, default 8000) and the job degrades to the
   browser while the background attempt keeps running — if the tray comes up
   later, the next print is silent again.
+- **CRITICAL: prints with no remembered printer crashed into the offline
+  queue (`TypeError: Assignment to constant variable`).** `printQZ()`
+  declared the resolved printer as `const` and then reassigned it inside the
+  OS-default-printer branch (`printer = state._defaultPrinter`), so every
+  print on a fresh browser profile, a cleared localStorage, a vanished
+  printer or a pending server restore threw — processQueue swallowed the
+  TypeError and parked the job in `sp_offline_queue` with a generic
+  "QZ Tray offline" instead of printing or falling back. This was the real
+  engine behind "print fails on Windows — no print until reload": the
+  default-printer resolution (v1.5.0) had literally never worked. Now `let`.
+- **A socket that is still CONNECTING is no longer adopted as "connected".**
+  `qz.websocket.isActive()` also reports true while a legacy `app.js`
+  bootstrap's handshake is still in flight; adoption then ran
+  `qz.printers.find()` on that socket — instant throw on desktop, infinite
+  hang on phones — and treated BOTH outcomes as a live tray: `qzReady`
+  flipped true, a phantom `connected` event fired, `GET /qz/printer` was
+  re-fetched, and the next print was routed into a dead socket instead of
+  the browser fallback. Adoption now requires discovery to actually ANSWER
+  (5s cap); a mid-handshake socket stays unadopted and prints degrade to the
+  fallback they should have used.
+- **Every QZ print is now time-capped (`QZ_CONFIG.printTimeoutMs`, default
+  25000).** A tray socket that opened but never answers (auth stuck, dead
+  spooler, half-finished handshake) used to hold `await printQZ(job)` — and
+  with it the whole print-queue mutex — forever: later prints piled up
+  silently and only a page reload printed again. The watchdog degrades the
+  job to the browser fallback, closes the dead socket, and the NEXT print
+  still goes through QZ once it answers. A single-dispatch guard
+  (`dispatchFallback`) makes the watchdog and a late-waking printQZ
+  mutually exclusive so a stalled receipt can never print twice.
+- **The no-tray reconnect storm is gone.** The auto-reconnect tick used to
+  call `connectQZ(1)` — a full port scan of all 8 candidate sockets, then a
+  1.5s nap, then a SECOND scan — every 10 seconds forever (16 failed
+  WebSockets per tick, the console wall of "WebSocket connection failed").
+  Ticks now scan once (`retries=0`) and back off progressively per
+  consecutive failure (10s → 30s → 60s → 2min → 5min cap); a success resets
+  the ladder immediately, and a print click always scans fresh regardless
+  of the ladder. `connectQZ()`'s default retries dropped 2 → 1 (the first
+  fallback on a tray-less machine now fires in ~1.5s instead of ~4s), and
+  `restorePrinter()` performs its `GET /qz/printer` server round-trip once
+  per page instead of on every (phantom) reconnect.
+- **Image jobs are printable by the browser fallback too.** `handleNoConnection()`
+  treated only `pdf`/`html` as printable, so `printImage(...)` on a phone or
+  tray-less machine was parked in the offline queue with a "QZ Tray offline"
+  error instead of just printing; `image` specs now route through the same
+  iframe/new-tab engines (`<img>` print document).
 
 ## [1.4.2] — 2026-09-13
 
