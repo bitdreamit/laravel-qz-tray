@@ -95,6 +95,11 @@
  *     "QZ Tray connected — N printers · using X" or "QZ Tray NOT running
  *     — printing via the browser dialog"). Disable/override with
  *     window.QZ_CONFIG.connectionHotkey.
+ *   • every knob above lives in ONE table — QZ_DEFAULTS at the top of this
+ *     file, applied through a single qzCfg() accessor; window.QZ_CONFIG
+ *     overrides per key. SmartPrint.config() returns the effective merged
+ *     values for the current page, so "what can I switch?" is always one
+ *     console call away.
  *
  * Silent by default (v1.5.0) — no "Select Printer" modal, no qz:launch
  * protocol prompt, no install alerts. With no printer remembered the OS
@@ -112,6 +117,109 @@ window.SmartPrint = (() => {
     const GLOBAL_KEY     = 'smart_printer_global';
     const DEVICE_ID_KEY  = 'smart_print_device_id';
     let processingQueue  = false; // prevent concurrent processQueue calls
+
+    // ============================================================
+    // QZ_CONFIG — THE one section that controls everything (v1.5.5)
+    // ============================================================
+    // Every option this library understands lives in THIS table. Set any
+    // subset of them on the page, BEFORE smart-print.js loads:
+    //
+    //   <script>
+    //     window.QZ_CONFIG = {
+    //         connectOnInit: true,            // scan the tray on page load
+    //         autoReconnect: true,            // background 10s→5min ladder
+    //         connectionHotkey: { enabled: false },
+    //     };
+    //   </script>
+    //   <script src="/vendor/qz-tray/js/smart-print.js?v=..."></script>
+    //
+    // Defaults are SILENT-BY-DEFAULT: a page that sets nothing performs
+    // ZERO localhost calls on load (no wss://localhost scan, no /qz/*
+    // fetch), ZERO reconnect attempts when the tray is absent, ZERO
+    // dialogs and ZERO console errors. The tray is contacted only when a
+    // print actually needs it (or Ctrl+Shift+Q is pressed), and one failed
+    // scan arms a 60s cooldown during which every print goes straight to
+    // the browser — no reload, no storm. Every switch you can flip:
+    //
+    //   CONNECTION (all off / silent by default)
+    //   connectOnInit          false   probe the tray when the page loads
+    //                                  (pre-1.5.5 behavior; lazy is default)
+    //   autoReconnect          false   background reconnect ladder 10s→5min
+    //   launchProtocol         false   try qz:launch after a failed scan
+    //                                  (pops a browser prompt — opt-in!)
+    //   unavailableCooldownMs  60000   ms prints skip a dead tray after one
+    //                                  failed scan (0 disables the cooldown)
+    //   connectTimeoutMs        8000   cap for ONE connect attempt per print
+    //   connectRetryDelayMs     1500   nap between retries inside an attempt
+    //
+    //   PRINT PIPELINE
+    //   printTimeoutMs         25000   cap for ONE QZ print (watchdog)
+    //   fallbackMode           'auto'  'auto'|'iframe'|'window'|'newtab'
+    //                                  |'download'|'queue'|'none'|false|fn
+    //   mobileFallbackMode     null    phones/tablets override (default auto
+    //                                  routes them through 'newtab')
+    //   fetchMode              'auto'  hydration: 'auto'|'always'|'never'|false
+    //   fallbackLoadWatchdogMs 20000   iframe load watchdog for fallbacks
+    //   notify                 false   toast when a job degrades to browser
+    //   onFallback             null    function(job) on every fallback
+    //   printerPrompt          false   auto "Select Printer" modal before print
+    //
+    //   HOTKEYS (Ctrl+Shift+Q = tray connection check, v1.5.5)
+    //   connectionHotkey       { enabled: true, combination: 'ctrl+shift+q' }
+    //                                  the manual probe + status toast;
+    //                                  also doubles as "reconnect NOW" — it
+    //                                  clears the unavailable cooldown
+    //   hotkey                 { enabled: true, combination: 'ctrl+shift+p' }
+    //                                  opens the printer switcher modal
+    //
+    //   SERVER / IDENTITY
+    //   serverSync             true    remember printer/log jobs server-side
+    //   prefix                 null    route prefix (default '/qz')
+    //   endpoints              null    { certificate, sign, print, ... }
+    //   assetsBase             '/vendor/qz-tray/js'
+    //   tenantId / projectId   undefined  page-wide tenant scoping
+    //   uuidVersion            'v7'    job id flavor ('v4' opts out)
+    //   observeDom             false   re-scan DOM for new .smart-print nodes
+    // ============================================================
+    const QZ_DEFAULTS = {
+        // connection
+        connectOnInit:          false,
+        autoReconnect:          false,
+        launchProtocol:         false,
+        unavailableCooldownMs:  60000,
+        connectTimeoutMs:       8000,
+        connectRetryDelayMs:    1500,
+        // print pipeline
+        printTimeoutMs:         25000,
+        fallbackMode:           'auto',
+        mobileFallbackMode:     undefined,
+        fetchMode:              'auto',
+        fallbackLoadWatchdogMs: 20000,
+        notify:                 false,
+        onFallback:             null,
+        printerPrompt:          false,
+        // hotkeys
+        connectionHotkey:       { enabled: true, combination: 'ctrl+shift+q' },
+        hotkey:                 { enabled: true, combination: 'ctrl+shift+p' },
+        // server / identity
+        serverSync:             true,
+        prefix:                 null,
+        endpoints:              null,
+        assetsBase:             '/vendor/qz-tray/js',
+        tenantId:               undefined,
+        projectId:              undefined,
+        uuidVersion:            'v7',
+        observeDom:             false,
+    };
+
+    // Single accessor for every option read below — window.QZ_CONFIG wins
+    // per key, QZ_DEFAULTS fills the rest. Nothing else in this file should
+    // poke window.QZ_CONFIG directly, so the table above stays the one
+    // authoritative list of knobs and their silent-by-default values.
+    function qzCfg(key) {
+        const user = (typeof window !== 'undefined' && window.QZ_CONFIG) || {};
+        return user[key] !== undefined ? user[key] : QZ_DEFAULTS[key];
+    }
 
     // ============================
     // UUID helpers
@@ -175,7 +283,7 @@ window.SmartPrint = (() => {
     // values either way), it just keeps ids consistently time-sortable
     // when they do.
     function generateJobId() {
-        if (window.QZ_CONFIG && window.QZ_CONFIG.uuidVersion === 'v4') {
+        if (qzCfg('uuidVersion') === 'v4') {
             return uuid4();
         }
         try {
@@ -248,15 +356,15 @@ window.SmartPrint = (() => {
     // or supply absolute URLs per endpoint:
     //   window.QZ_CONFIG = { endpoints: { certificate: '/printing/certificate', ... } };
     function apiBase() {
-        const cfg = window.QZ_CONFIG || {};
-        if (cfg.prefix !== undefined && cfg.prefix !== null) {
-            return '/' + String(cfg.prefix).replace(/^\/+|\/+$/g, '');
+        const prefix = qzCfg('prefix');
+        if (prefix !== undefined && prefix !== null) {
+            return '/' + String(prefix).replace(/^\/+|\/+$/g, '');
         }
         return '/qz';
     }
 
     function endpoint(name) {
-        const cfg = window.QZ_CONFIG || {};
+        const overrides = qzCfg('endpoints');
         const defaults = {
             certificate: apiBase() + '/certificate',
             sign:        apiBase() + '/sign',
@@ -265,14 +373,14 @@ window.SmartPrint = (() => {
             print:       apiBase() + '/print',
             jobs:        apiBase() + '/jobs',
         };
-        return (cfg.endpoints && cfg.endpoints[name]) || defaults[name];
+        return (overrides && overrides[name]) || defaults[name];
     }
 
     // Server sync is opt-out via window.QZ_CONFIG.serverSync = false, for
     // deployments that only ever want the localStorage-only behavior of
     // pre-1.1 releases.
     function serverSyncEnabled() {
-        return !(window.QZ_CONFIG && window.QZ_CONFIG.serverSync === false);
+        return qzCfg('serverSync') !== false;
     }
 
     const state = {
@@ -339,7 +447,7 @@ window.SmartPrint = (() => {
     // When the window expires the NEXT print probes the tray once more, so
     // starting QZ Tray mid-session silently re-enables direct printing.
     function unavailableCooldownMs() {
-        const cfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.unavailableCooldownMs, 10);
+        const cfg = parseInt(qzCfg('unavailableCooldownMs'), 10);
         return cfg > 0 ? cfg : 60000;   // 60s default
     }
     function markQzUnavailable() {
@@ -364,7 +472,7 @@ window.SmartPrint = (() => {
     // v1.5.5: connect-on-load is OPT-IN. The default page load performs NO
     // connection attempt at all; the first print (or Ctrl+Shift+Q) connects.
     function resolveConnectOnInit() {
-        return !!(window.QZ_CONFIG && window.QZ_CONFIG.connectOnInit === true);
+        return qzCfg('connectOnInit') === true;
     }
     // v1.5.5: parked offline jobs retry on the FIRST successful connection —
     // with lazy connect there is no load-time connect to piggyback on anymore.
@@ -478,12 +586,12 @@ window.SmartPrint = (() => {
                 // need a new app to open this qz link" dialog — an install
                 // alert kiosk users must never see. Off by default now;
                 // opt in per page with window.QZ_CONFIG.launchProtocol = true.
-                if (window.QZ_CONFIG && window.QZ_CONFIG.launchProtocol) {
+                if (qzCfg('launchProtocol')) {
                     try { launchQZProtocol(); } catch (_) {}
                 }
                 // v1.5.5: retry nap is configurable (kiosks can go 0; the
                 // smoke tests do) — default stays 1500ms.
-                const napCfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.connectRetryDelayMs, 10);
+                const napCfg = parseInt(qzCfg('connectRetryDelayMs'), 10);
                 await new Promise(r => setTimeout(r, napCfg >= 0 ? napCfg : 1500));
                 return attemptConnect(retries - 1);
             }
@@ -550,7 +658,7 @@ window.SmartPrint = (() => {
     async function connectQZ(retries = 1) {
         if (!window.qz) {
             console.warn('[SmartPrint] QZ Tray library not loaded. Add <script src="' +
-                (window.QZ_CONFIG && window.QZ_CONFIG.assetsBase ? window.QZ_CONFIG.assetsBase : '/vendor/qz-tray/js') + '/qz-tray.min.js"></script> to your page (before smart-print.js).');
+                qzCfg('assetsBase') + '/qz-tray.min.js"></script> to your page (before smart-print.js).');
             emit('init-failed', { reason: 'qz-library-missing' });
             return false;
         }
@@ -596,7 +704,8 @@ window.SmartPrint = (() => {
     // tenant_id_resolver config (or null) — the client never needs to know
     // which.
     function pageTenantId() {
-        return window.QZ_CONFIG && (window.QZ_CONFIG.tenantId ?? window.QZ_CONFIG.projectId);
+        const tenant = qzCfg('tenantId');
+        return (tenant !== undefined) ? tenant : qzCfg('projectId');
     }
 
     function restorePrinter() {
@@ -745,7 +854,7 @@ window.SmartPrint = (() => {
                 // state. Cap the wait: after the cap the job degrades to the
                 // browser fallback while the background attempt keeps running —
                 // if the tray comes up later, the NEXT print is silent again.
-                const capCfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.connectTimeoutMs, 10);
+                const capCfg = parseInt(qzCfg('connectTimeoutMs'), 10);
                 const connectCap = capCfg > 0 ? capCfg : 8000;
                 let capTimer;
                 let connected = false;
@@ -779,7 +888,7 @@ window.SmartPrint = (() => {
                     // whole QZ attempt — on timeout degrade to the browser
                     // fallback, release the socket, and keep the queue
                     // alive. Configurable via QZ_CONFIG.printTimeoutMs.
-                    const ptCfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.printTimeoutMs, 10);
+                    const ptCfg = parseInt(qzCfg('printTimeoutMs'), 10);
                     const printCap = ptCfg > 0 ? ptCfg : 25000;
                     let printTimer;
                     const outcome = await Promise.race([
@@ -824,11 +933,11 @@ window.SmartPrint = (() => {
     // QZ_CONFIG.onFallback = fn receives the job) so business flows are
     // never interrupted by UI noise.
     function notifyFallback(job) {
-        const cfg = window.QZ_CONFIG || {};
-        if (typeof cfg.onFallback === 'function') {
-            try { cfg.onFallback(job); } catch (e) { console.error('[SmartPrint] onFallback error:', e); }
+        const onFallback = qzCfg('onFallback');
+        if (typeof onFallback === 'function') {
+            try { onFallback(job); } catch (e) { console.error('[SmartPrint] onFallback error:', e); }
         }
-        if (cfg.notify) toastNotice('QZ Tray unavailable — printed via browser');
+        if (qzCfg('notify')) toastNotice('QZ Tray unavailable — printed via browser');
     }
 
     function toastNotice(msg) {
@@ -919,9 +1028,7 @@ window.SmartPrint = (() => {
         // Per-job value wins; otherwise fall back to a page-wide default set
         // by the host app (e.g. window.QZ_CONFIG.tenantId = '{{ $project->id }}'
         // — works whether that id is a bigint or a uuid string).
-        const tenantId = job.tenantId ?? job.projectId
-            ?? (window.QZ_CONFIG && (window.QZ_CONFIG.tenantId ?? window.QZ_CONFIG.projectId))
-            ?? undefined;
+        const tenantId = job.tenantId ?? job.projectId ?? pageTenantId() ?? undefined;
 
         // v1.5.0: the server caps url at 2048 chars and error_message at 1000
         // (QzSecurityController::print validation). A URL that carries a PDF
@@ -1010,7 +1117,7 @@ window.SmartPrint = (() => {
             // QZ Tray running?". The modal is now opt-in per page:
             //   window.QZ_CONFIG.printerPrompt = true    (auto-ask again)
             //   SmartPrint.showPrinterSwitcher()         (your own button)
-            if (window.QZ_CONFIG && window.QZ_CONFIG.printerPrompt) {
+            if (qzCfg('printerPrompt')) {
                 // Promise stays pending — resolved/rejected once the user
                 // answers the printer-selection modal (see openPrinterModal).
                 openPrinterModal(job);
@@ -1234,8 +1341,7 @@ window.SmartPrint = (() => {
     // Returns true when something printable was actually dispatched.
     function resolveFallbackMode(job) {
         if (job && job.fallback !== undefined && job.fallback !== null) return job.fallback;
-        const cfg = window.QZ_CONFIG || {};
-        return cfg.fallbackMode !== undefined ? cfg.fallbackMode : 'auto';
+        return qzCfg('fallbackMode');
     }
 
     // Build a printable spec from a legacy job shape (type/url/data/element)
@@ -1300,7 +1406,7 @@ window.SmartPrint = (() => {
             if (!specs.length) {
                 mode = 'none';
             } else {
-                const mobileMode = window.QZ_CONFIG && window.QZ_CONFIG.mobileFallbackMode;
+                const mobileMode = qzCfg('mobileFallbackMode');
                 mode = isMobileDevice()
                     ? (mobileMode === 'iframe' || mobileMode === 'newtab' || mobileMode === 'download' ? mobileMode : 'newtab')
                     : 'iframe';
@@ -1387,8 +1493,7 @@ window.SmartPrint = (() => {
         // watchdog armed BEFORE load guarantees done() always runs.
         let finished = false;
         let loaded   = false;
-        const cfg = (typeof window !== 'undefined' && window.QZ_CONFIG) || {};
-        const WATCHDOG = parseInt(cfg.fallbackLoadWatchdogMs, 10) || 20000;
+        const WATCHDOG = parseInt(qzCfg('fallbackLoadWatchdogMs'), 10) || 20000;
 
         const finish = () => {
             if (finished) return;
@@ -1871,7 +1976,7 @@ window.SmartPrint = (() => {
     // ctrl+shift+p. It now honors window.QZ_CONFIG.hotkey (bridged by the
     // package views) and still defaults to ctrl+shift+p otherwise.
     (() => {
-        const hotkeyCfg = (window.QZ_CONFIG && window.QZ_CONFIG.hotkey) || {};
+        const hotkeyCfg = qzCfg('hotkey') || {};
         if (hotkeyCfg.enabled === false) return;
 
         const combo = String(hotkeyCfg.combination || 'ctrl+shift+p')
@@ -1903,7 +2008,7 @@ window.SmartPrint = (() => {
     //   window.QZ_CONFIG.connectionHotkey = { enabled: false }
     //   window.QZ_CONFIG.connectionHotkey = { combination: 'ctrl+alt+q' }
     (() => {
-        const cfg = (window.QZ_CONFIG && window.QZ_CONFIG.connectionHotkey) || {};
+        const cfg = qzCfg('connectionHotkey') || {};
         if (cfg.enabled === false) return;
 
         const combo = String(cfg.combination || 'ctrl+shift+q')
@@ -1948,7 +2053,7 @@ window.SmartPrint = (() => {
     const RECONNECT_LADDER = [10000, 30000, 60000, 120000, 300000];
     setInterval(() => {
         if (!window.qz || qz.websocket.isActive()) return;
-        if (!(window.QZ_CONFIG && window.QZ_CONFIG.autoReconnect === true)) return; // v1.5.5
+        if (qzCfg('autoReconnect') !== true) return; // v1.5.5
         if (qzInCooldown()) return;                                                 // v1.5.5
         // state.connectPromise covers a HUNG attempt (phone handshake that
         // never settles) — without this guard every tick would still think
@@ -1972,7 +2077,7 @@ window.SmartPrint = (() => {
     // ============================
     function init() {
         bind();
-        if (window.QZ_CONFIG && window.QZ_CONFIG.observeDom) {
+        if (qzCfg('observeDom')) {
             observeDom();
         }
         // v1.5.5: LAZY connection. A page load no longer scans the tray
@@ -2081,10 +2186,9 @@ window.SmartPrint = (() => {
         if (!spec || !spec.url || spec.base64 || spec.data) return spec;
         if (spec.type !== 'pdf' && spec.type !== 'image' && spec.type !== 'html') return spec;
 
-        const cfg = (typeof window !== 'undefined' && window.QZ_CONFIG) || {};
         const mode = (callOpts && callOpts.fetch !== undefined) ? callOpts.fetch
             : spec.fetch !== undefined ? spec.fetch
-            : (cfg.fetchMode !== undefined ? cfg.fetchMode : 'auto');
+            : qzCfg('fetchMode');
         if (mode === false || mode === 'never') return spec;
         if (mode !== 'always' && !isSameOriginUrl(spec.url)) return spec;
 
@@ -2710,6 +2814,10 @@ window.SmartPrint = (() => {
         // Settings
         getSettings:    () => ({ defaultPrinter: state.currentPrinter }),
         updateSettings: (s) => { if (s.defaultPrinter) rememberPrinter(s.defaultPrinter); emit('settings-updated', s); },
+        // v1.5.5: the EFFECTIVE config — QZ_DEFAULTS merged with whatever the
+        // page set on window.QZ_CONFIG. One call shows every knob and the
+        // value actually in force (SmartPrint.config().autoReconnect etc.).
+        config: () => Object.keys(QZ_DEFAULTS).reduce((out, key) => { out[key] = qzCfg(key); return out; }, {}),
 
         // Events
         on:  (event, fn) => { state.listeners[event] = state.listeners[event] || []; state.listeners[event].push(fn); },

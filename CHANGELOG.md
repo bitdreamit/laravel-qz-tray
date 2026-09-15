@@ -37,6 +37,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Background auto-reconnect is now opt-in** (`window.QZ_CONFIG.autoReconnect
   = true`). The print-time probe + cooldown fully replace it; the
   10s → 5min backoff ladder remains available for live status pages.
+- **One QZ_CONFIG section controls everything (v1.5.5).** All 25 options the
+  client understands now live in a single documented table (`QZ_DEFAULTS`) at
+  the top of `smart-print.js`, applied through one accessor — `window.QZ_CONFIG`
+  overrides per key, the table fills the rest. Defaults are silent-by-default:
+  a page that sets nothing makes ZERO localhost calls on load, ZERO reconnect
+  attempts when the tray is absent, ZERO dialogs and ZERO console errors.
+  `SmartPrint.config()` prints the effective merged values for the current page.
 - Offline-queued jobs (`fallbackMode: 'queue'`) now retry on the FIRST
   successful connection instead of at page load (lazy-connect companion).
 - A hung handshake that degrades to the browser fallback

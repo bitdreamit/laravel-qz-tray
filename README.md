@@ -1,7 +1,7 @@
 # Laravel QZ Tray
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-1.5.0-6f42c1?style=for-the-badge" alt="v1.5.5">
+  <img src="https://img.shields.io/badge/Version-1.5.0-6f42c1?style=for-the-badge" alt="v1.5.0">
   <img src="https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012%20|%2013-FF2D20?style=for-the-badge&logo=laravel&logoColor=white" alt="Laravel">
   <img src="https://img.shields.io/badge/PHP-8.1%2B-777BB4?style=for-the-badge&logo=php&logoColor=white" alt="PHP">
   <img src="https://img.shields.io/badge/QZ%20Tray-2.2.6-0078D4?style=for-the-badge" alt="QZ Tray">
@@ -1169,7 +1169,13 @@ return [
 ];
 ```
 
-**Browser-side config** (`window.QZ_CONFIG`, set in your layout before the scripts):
+**Browser-side config** (`window.QZ_CONFIG`, set in your layout before the scripts).
+Every knob below lives in ONE documented table — `QZ_DEFAULTS` at the top of
+`smart-print.js`, applied through a single accessor, so the file header is
+always the authoritative list. `SmartPrint.config()` returns the merged values
+actually in force on the current page (defaults + your overrides). Defaults are
+**silent-by-default**: set nothing and a page makes zero localhost calls on
+load, zero reconnect attempts, zero dialogs, zero console errors:
 
 | Key | Default | Controls |
 |---|---|---|
@@ -1187,13 +1193,23 @@ return [
 | `printTimeoutMs` | `25000` | Cap on a silent QZ print before the browser fallback takes over |
 | `connectionHotkey` | `ctrl+shift+q` | v1.5.5 tray connection-check shortcut (`{ enabled: false }` to disable, `combination` to rebind) |
 | `connectRetryDelayMs` | `1500` | v1.5.5: nap between connect retries (0 = scan once, no retry nap) |
+| `launchProtocol` | `false` | Try `qz:launch` after a failed scan (pops a native browser prompt — opt-in only) |
+| `printerPrompt` | `false` | Auto "Select Printer" modal before printing when no printer is remembered |
+| `mobileFallbackMode` | auto → `'newtab'` | Pin the phone/tablet fallback engine: `'newtab'` \| `'iframe'` \| `'download'` |
+| `fallbackLoadWatchdogMs` | `20000` | Hidden-iframe load watchdog — a frame that never fires `load` releases the fallback chain |
+| `serverSync` | `true` | `false` = localStorage-only printer memory + no job logging (pre-1.1 behavior) |
+| `prefix` | `'/qz'` | Route prefix if you republished the routes under another path |
+| `endpoints` | — | Per-endpoint absolute overrides: `{ certificate, sign, print, printer, jobs }` |
+| `assetsBase` | `'/vendor/qz-tray/js'` | Where qz-tray.min.js lives (only used in the "library missing" hint) |
+| `uuidVersion` | `'v7'` | Job-id flavor: time-sortable v7 (default) or `'v4'` |
 
 **Connection check (v1.5.5):** press **Ctrl+Shift+Q** anywhere for an instant
 tray probe — toast + console shows `QZ Tray connected — N printers · using X`
 or `QZ Tray NOT running — printing via the browser dialog`. It overrides any
 cooldown, so it also doubles as "I just started the tray — reconnect now".
 Programmatically: `SmartPrint.connectionCheck()`; current state:
-`SmartPrint.status().unavailableForMs`.
+`SmartPrint.status().unavailableForMs`; effective config (every knob + the
+value in force): `SmartPrint.config()`.
 
 ## Artisan Commands
 
