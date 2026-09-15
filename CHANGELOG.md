@@ -206,6 +206,24 @@ were the earlier fix batches). Everything below ships in this release.
   fetched by the browser (with the session cookie) and handed to QZ —
   QZ Tray alone cannot download them (no session → login HTML →
   "Cannot parse … as a PDF file").
+- **The browser fallback now works on EVERY call — not only after a page
+  reload.** Three dead ends found and fixed. (1) `printIframe()` armed its
+  cleanup timer INSIDE `onload`, so a frame that never fired `load` (blob:
+  PDFs on mobile, blocked content, stalled network) never released the ONE
+  serialized fallback queue — every later print silently queued behind it
+  and only a reload printed again; a load watchdog armed BEFORE load
+  (`QZ_CONFIG.fallbackLoadWatchdogMs`, default 20000) now guarantees the
+  queue always advances. (2) On phones/tablets a hidden-iframe
+  `window.print()` is a silent no-op — the 'auto' engine now routes mobile
+  devices through the new-tab engine (the OS document viewer opens;
+  print/share from there), with a programmatic-download then iframe safety
+  net when the popup is blocked (`QZ_CONFIG.mobileFallbackMode` pins
+  'newtab' | 'iframe' | 'download'). (3) `processQueue()` awaited the tray
+  connect UNCONDITIONALLY — a hung mobile `wss://localhost:8181` handshake
+  parked the first print forever with no error; the wait is now capped
+  (`QZ_CONFIG.connectTimeoutMs`, default 8000) and the job degrades to the
+  browser while the background attempt keeps running — if the tray comes up
+  later, the next print is silent again.
 
 ## [1.4.2] — 2026-09-13
 

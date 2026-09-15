@@ -56,6 +56,17 @@
  * custom function). Configure globally: window.QZ_CONFIG.fallbackMode.
  * Nothing throws unhandled; every promise resolves with a clear result.
  *
+ * v1.5.4 — the fallback works on EVERY call, never only after a reload:
+ *   • phones/tablets route through the new-tab engine (hidden-iframe
+ *     window.print() is a no-op on iOS/Android) — the OS document viewer
+ *     opens, with a programmatic-download and iframe safety net;
+ *   • a hidden iframe that never fires `load` (blob: PDFs on mobile,
+ *     stalled networks) is released by a watchdog, so the ONE serialized
+ *     fallback queue can never deadlock;
+ *   • the tray-connect wait is capped (QZ_CONFIG.connectTimeoutMs, default
+ *     8000) — a hung wss://localhost handshake degrades to the browser
+ *     instead of parking the first print forever.
+ *
  * Silent by default (v1.5.0) — no "Select Printer" modal, no qz:launch
  * protocol prompt, no install alerts. With no printer remembered the OS
  * DEFAULT printer prints. Opt back in per page:
@@ -596,10 +607,29 @@ window.SmartPrint = (() => {
             const job = state.queue.shift();
             emit('job-processing', { job });
             try {
-                const connected = await connectQZ();
+                // v1.5.4: the connect attempt used to be awaited UNCONDITIONALLY.
+                // On mobile browsers the wss://localhost:8181 handshake can HANG
+                // instead of refusing (and attemptConnect retries twice on top),
+                // so the first print click waited forever with no fallback, no
+                // error — a page reload only "fixed" it because it reset the
+                // state. Cap the wait: after the cap the job degrades to the
+                // browser fallback while the background attempt keeps running —
+                // if the tray comes up later, the NEXT print is silent again.
+                const capCfg = window.QZ_CONFIG && parseInt(window.QZ_CONFIG.connectTimeoutMs, 10);
+                const connectCap = capCfg > 0 ? capCfg : 8000;
+                let capTimer;
+                const connected = await Promise.race([
+                    connectQZ(),
+                    new Promise(res => { capTimer = setTimeout(() => res(false), connectCap); }),
+                ]).finally(() => clearTimeout(capTimer));
+
                 if (connected) {
                     await printQZ(job);
                 } else {
+                    if (state.connecting) {
+                        console.info('[SmartPrint] tray connection still pending after ' + connectCap +
+                            'ms — printing via the browser fallback; the tray can still connect for later prints.');
+                    }
                     handleNoConnection(job);
                 }
             } catch (err) {
@@ -1041,6 +1071,22 @@ window.SmartPrint = (() => {
                 && (s.url || s.data || s.base64 || s.element));
     }
 
+    // v1.5.4: phones/tablets cannot print through a 0x0 hidden iframe —
+    // iOS Safari ignores contentWindow.print() there entirely and Android
+    // Chrome rarely renders a PDF into a hidden frame, so the old auto
+    // fallback "succeeded" while NOTHING happened on those devices. The
+    // mobile path opens the document in a new tab instead (the OS viewer
+    // shows it; the user prints/shares from there).
+    function isMobileDevice() {
+        try {
+            const nav = (typeof navigator !== 'undefined') ? navigator : null;
+            const ua  = (nav && nav.userAgent) || '';
+            const touch = (nav && nav.maxTouchPoints) || 0;
+            return /Android|iPhone|iPad|iPod|Mobile|Silk|Kindle/i.test(ua)
+                || (/Macintosh/.test(ua) && touch > 1);   // iPadOS 13+ reports a Mac UA
+        } catch (e) { return false; }
+    }
+
     function fallback(job) {
         let mode = resolveFallbackMode(job);
         emit('fallback-print', { job, mode });
@@ -1055,7 +1101,17 @@ window.SmartPrint = (() => {
         if (mode === 'auto' || mode === undefined || mode === null) {
             // Anything a browser can print goes to the iframe engine; raw
             // printer languages return false so the offline queue retains it.
-            mode = specs.length ? 'iframe' : 'none';
+            // v1.5.4: mobile devices go through the new-tab engine instead —
+            // hidden-iframe window.print() is a silent no-op there. Pin it
+            // per page with window.QZ_CONFIG.mobileFallbackMode.
+            if (!specs.length) {
+                mode = 'none';
+            } else {
+                const mobileMode = window.QZ_CONFIG && window.QZ_CONFIG.mobileFallbackMode;
+                mode = isMobileDevice()
+                    ? (mobileMode === 'iframe' || mobileMode === 'newtab' || mobileMode === 'download' ? mobileMode : 'newtab')
+                    : 'iframe';
+            }
         }
 
         switch (mode) {
@@ -1068,9 +1124,24 @@ window.SmartPrint = (() => {
                 return true;
             case 'window':
                 return specs.map(windowFallback).some(Boolean);
-            case 'newtab':
-                specs.forEach(s => { if (s.url || s.base64) window.open(s.base64 ? (base64ToBlobUrl(s.base64, s.imageMime) || s.url) : s.url, '_blank'); });
-                return specs.length > 0;
+            case 'newtab': {
+                let dispatched = false;
+                specs.forEach(s => {
+                    if (windowFallback(s)) { dispatched = true; return; }
+                    // v1.5.4: the fallback usually runs AFTER async hops
+                    // (hydration fetch, connect attempt) — the original user
+                    // gesture is long gone and window.open can be popup-
+                    // blocked. A programmatic <a download> click is not
+                    // gesture-gated; the watchdog-protected hidden iframe is
+                    // the last resort. Either way SOMETHING is dispatched —
+                    // the old code returned true here even when the popup
+                    // was silently blocked and nothing happened at all.
+                    if (downloadSpec(s)) { dispatched = true; return; }
+                    queueFallbackTask(resolve => fallbackIframe(s, job, resolve));
+                    dispatched = true;
+                });
+                return dispatched;
+            }
             case 'download':
                 return specs.map(downloadSpec).some(Boolean);
             default:
@@ -1104,16 +1175,35 @@ window.SmartPrint = (() => {
         iframe.style.cssText = 'width:0;height:0;border:0;position:absolute;left:-9999px;';
         iframe.src  = src;
 
+        // v1.5.4: the cleanup timer used to be armed ONLY inside onload —
+        // when the frame never fires load (mobile browsers + blob: PDFs,
+        // blocked content, stalled network) done() NEVER ran and the one
+        // serialized fallback chain stalled FOREVER: every later print
+        // silently queued and only a full page reload printed again. A load
+        // watchdog armed BEFORE load guarantees done() always runs.
+        let finished = false;
+        let loaded   = false;
+        const cfg = (typeof window !== 'undefined' && window.QZ_CONFIG) || {};
+        const WATCHDOG = parseInt(cfg.fallbackLoadWatchdogMs, 10) || 20000;
+
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(loadWatchdog);
+            setTimeout(() => { if (iframe.parentNode) iframe.remove(); done && done(); }, 400);
+        };
+
+        const loadWatchdog = setTimeout(() => {
+            if (loaded) return;   // frame loaded fine — the post-onload timer owns cleanup
+            console.warn('[SmartPrint] fallback iframe never fired load — releasing the fallback queue.');
+            finish();
+        }, WATCHDOG);
+
         iframe.onload = () => {
+            loaded = true;
             try {
                 const win = iframe.contentWindow;
-                if (!win) { iframe.remove(); done && done(); return; }
-                let finished = false;
-                const finish = () => {
-                    if (finished) return;
-                    finished = true;
-                    setTimeout(() => { if (iframe.parentNode) iframe.remove(); done && done(); }, 400);
-                };
+                if (!win) { finish(); return; }
                 win.onafterprint = finish;          // Chrome/Edge/Firefox
                 win.focus();
                 win.print();
@@ -1123,8 +1213,7 @@ window.SmartPrint = (() => {
                 setTimeout(finish, 60000);
             } catch (e) {
                 console.warn('[SmartPrint] iframe print failed:', e);
-                iframe.remove();
-                done && done();
+                finish();
             }
         };
 
